@@ -1,0 +1,17 @@
+# Environment & secrets
+.venv/
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Build output
+build/
+dist/
+
+# Old code, design drafts, local data
+archive/
+.design/
+learned.json
+*.lnk
