@@ -1,9 +1,11 @@
-"""Jarvis 3.0 hands: connects to the server brain over Tailscale and runs core/actions.py.
+"""Jarvis 3.0 hands: connects to the server brain and runs tools on this laptop.
 
-The server decides, the laptop executes. Only functions in ALLOWED can run,
-whatever the server asks for.
+The server decides, the laptop executes. Only functions in ALLOWED (core/actions.py)
+and LOCAL can run, whatever the server asks for.
 """
 import asyncio
+import base64
+import io
 import json
 import logging
 import os
@@ -66,8 +68,68 @@ def open_app(name):
     return actions.open_app(name)
 
 
+MAX_FILE = 20 * 1024 * 1024  # Telegram bot uploads stop at 50 MB; base64 over WS adds a third
+
+
+def run_shell(command, timeout=60):
+    timeout = max(1, min(int(timeout), 600))
+    script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ProgressPreference='SilentlyContinue'; " + command
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True, timeout=timeout, cwd=os.path.expanduser("~"),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return "Ошибка: команда не уложилась в %d с." % timeout
+    out = (proc.stdout + proc.stderr).decode("utf-8", errors="replace").strip()
+    if proc.returncode:
+        return "Ошибка (код %d):\n%s" % (proc.returncode, out)
+    return out or "(пусто, код 0)"
+
+
+def read_file(path):
+    if os.path.getsize(path) > 2 * 1024 * 1024:
+        raise actions.ActionError("Файл больше 2 МБ, читай частями через run_shell (Get-Content -TotalCount).")
+    with open(path, "rb") as f:
+        return f.read().decode("utf-8", errors="replace")
+
+
+def write_file(path, text):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return "Записал %d символов в %s." % (len(text), path)
+
+
+def send_file(path):
+    if not os.path.isfile(path):
+        raise actions.ActionError("Файла %s нет." % path)
+    if os.path.getsize(path) > MAX_FILE:
+        raise actions.ActionError("Файл больше 20 МБ, через Telegram-бота не пройдёт.")
+    with open(path, "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    return {"text": "Отправил %s." % os.path.basename(path), "file": data, "name": os.path.basename(path)}
+
+
+def send_screen():
+    from PIL import ImageGrab
+
+    buf = io.BytesIO()
+    ImageGrab.grab(all_screens=True).save(buf, format="PNG")
+    return {"text": "Скриншот отправлен пользователю.", "file": base64.b64encode(buf.getvalue()).decode(),
+            "name": "screen.png"}
+
+
+def put_file(path, data):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(base64.b64decode(data))
+    return "Сохранил %s." % path
+
+
 # Laptop-side tools that are not plain core/actions functions
-LOCAL = {"add_app": add_app, "open_app": open_app}
+LOCAL = {"add_app": add_app, "open_app": open_app, "run_shell": run_shell, "read_file": read_file,
+         "write_file": write_file, "send_file": send_file, "send_screen": send_screen, "put_file": put_file}
 
 
 class Worker(threading.Thread):
@@ -86,7 +148,7 @@ class Worker(threading.Thread):
     @staticmethod
     def _execute(tool, args):
         """Returns {"text": ...} plus "image" (base64 PNG) when a screenshot was taken."""
-        if tool not in ALLOWED and tool not in ("look", "ui_action", "add_app"):
+        if tool not in ALLOWED and tool not in LOCAL and tool not in ("look", "ui_action"):
             return {"text": "Ошибка: инструмент %s запрещён на ноутбуке." % tool}
         try:
             if tool == "look":
@@ -100,6 +162,8 @@ class Worker(threading.Thread):
         except Exception as e:
             log.exception("action %s failed", tool)
             return {"text": "Ошибка: %s: %s" % (type(e).__name__, e)}
+        if isinstance(result, dict):
+            return result
         return {"text": "Готово." if result is None else str(result)}
 
     async def submit(self, tool, args):
@@ -145,7 +209,7 @@ async def serve(worker):
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     continue
                 data = msg.json()
-                log.info("-> %s %s", data.get("tool"), data.get("args"))
+                log.info("-> %s %s", data.get("tool"), str(data.get("args"))[:300])
                 result = await worker.submit(data.get("tool"), data.get("args") or {})
                 log.info("<- %s", result["text"][:300])
                 await ws.send_json({"id": data.get("id"), **result})

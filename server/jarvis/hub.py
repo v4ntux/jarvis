@@ -53,7 +53,9 @@ class Hub:
             data = msg.json()
             fut = self.pending.get(data.get("id"))
             if fut and not fut.done():
-                fut.set_result({"text": str(data.get("text", "")), "image": data.get("image")})
+                data.pop("id")
+                data["text"] = str(data.get("text", ""))
+                fut.set_result(data)  # text, plus optional image / file+name
         if self.ws is ws:
             self.ws = None
             for fut in self.pending.values():

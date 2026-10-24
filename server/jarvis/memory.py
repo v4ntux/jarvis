@@ -14,6 +14,10 @@ class Memory:
             CREATE TABLE IF NOT EXISTS usage (
                 id INTEGER PRIMARY KEY, ts REAL, model TEXT,
                 tokens_in INTEGER, tokens_out INTEGER, cost REAL);
+            CREATE TABLE IF NOT EXISTS facts (
+                id INTEGER PRIMARY KEY, ts REAL, text TEXT);
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY, due REAL, text TEXT, done INTEGER DEFAULT 0);
             """
         )
 
@@ -48,3 +52,37 @@ class Memory:
     def spent_since(self, ts: float) -> float:
         row = self.db.execute("SELECT COALESCE(SUM(cost), 0) FROM usage WHERE ts >= ?", (ts,)).fetchone()
         return row[0]
+
+    # Long-term facts about the user; all of them go into the system prompt
+    def remember(self, text: str) -> int:
+        cur = self.db.execute("INSERT INTO facts (ts, text) VALUES (?, ?)", (time.time(), text))
+        self.db.commit()
+        return cur.lastrowid
+
+    def forget(self, fact_id: int) -> bool:
+        cur = self.db.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def facts(self) -> list[tuple[int, str]]:
+        return self.db.execute("SELECT id, text FROM facts ORDER BY id").fetchall()
+
+    def add_reminder(self, due: float, text: str) -> int:
+        cur = self.db.execute("INSERT INTO reminders (due, text) VALUES (?, ?)", (due, text))
+        self.db.commit()
+        return cur.lastrowid
+
+    def due_reminders(self) -> list[tuple[int, str]]:
+        return self.db.execute(
+            "SELECT id, text FROM reminders WHERE done = 0 AND due <= ?", (time.time(),)
+        ).fetchall()
+
+    def pending_reminders(self) -> list[tuple[int, float, str]]:
+        return self.db.execute(
+            "SELECT id, due, text FROM reminders WHERE done = 0 ORDER BY due"
+        ).fetchall()
+
+    def finish_reminder(self, reminder_id: int) -> bool:
+        cur = self.db.execute("UPDATE reminders SET done = 1 WHERE id = ? AND done = 0", (reminder_id,))
+        self.db.commit()
+        return cur.rowcount > 0
