@@ -11,7 +11,7 @@ from typing import Awaitable, Callable
 
 import anthropic
 
-from . import phone, shell, watchers, web
+from . import browser, phone, shell, watchers, web
 from .config import TZ, Config, day_start
 from .hub import HandsOffline, Hub
 from .memory import Memory
@@ -23,7 +23,8 @@ SYSTEM = """Ты Джарвис, личный ИИ-помощник как у Т
 Пользователь пишет транслитом и голосом, это нормально.
 
 Твои возможности:
-- Сервер (твой дом, работает 24/7): web_search и read_url для интернета, server_shell и server_job для команд, скриптов,
+- Сервер (твой дом, работает 24/7): web_search и read_url для интернета, browse/browser_action — свой браузер
+  для сайтов, где надо нажимать и заполнять, server_shell и server_job для команд, скриптов,
   скачивания и обработки файлов, server_send_file чтобы прислать результат. Своё python-окружение, pip install можно.
 - Ноутбук пользователя (Windows, бывает выключен): run_shell (PowerShell, полный доступ), программы, окна, клавиатура,
   файлы, look/ui_action для кликов.
@@ -39,7 +40,8 @@ SYSTEM = """Ты Джарвис, личный ИИ-помощник как у Т
 - ui_action сам возвращает свежий look после действия, отдельный look после него не нужен.
 - Сначала думай, каким самым коротким путём решить задачу. Команда в run_shell почти всегда быстрее и дешевле кликов.
 - Клики (look → ui_action) только для того, что нельзя сделать командой: интерфейсы программ, сайты под логином.
-- Скриншот (look со screenshot=true) дорогой: только если список элементов не помог.
+- Если список элементов не помог — look с vision=true (локально и бесплатно). Скриншот (screenshot=true)
+  дорогой: только если и vision не помогло.
 - Доводи задачу до конца сам, не проси пользователя нажать.
 - Никогда не говори, что сделал действие, если не вызвал инструмент и не получил успех.
 - Для фактов и новостей ищи в интернете, не выдумывай. Указывай источники ссылками.
@@ -138,6 +140,7 @@ class Brain:
         self.hub = hub
         self.client = anthropic.AsyncAnthropic(api_key=cfg.anthropic_key)
         self.phone = phone.Phone(cfg, memory)
+        self.browser = browser.Browser()
         # Set by the bot: tells the owner about events that happen outside a request (finished jobs)
         self.notify: Callable[[dict, str], Awaitable[None]] | None = None
 
@@ -257,6 +260,9 @@ class Brain:
                 return out
             if name == "server_send_file":
                 return await self._send_server_file(args["path"], session)
+            if name == "browser_screenshot":
+                await session.send_file("page.png", await self.browser.screenshot())
+                return {"text": "Скриншот страницы отправлен пользователю."}
             return {"text": await self._server_tool(name, args)}
         except HandsOffline as e:
             return {"text": f"Ошибка: {e}"}
@@ -287,6 +293,13 @@ class Brain:
             return await web.search(args["query"], args.get("limit") or 6, bool(args.get("news")))
         if name == "read_url":
             return await web.fetch(args["url"])
+        if name in ("browse", "browser_action"):
+            try:
+                if name == "browse":
+                    return await self.browser.open(args["url"])
+                return await self.browser.act(args["action"], args.get("id") or "", args.get("text") or "")
+            except browser.BrowserError as e:
+                return f"Ошибка: {e}"
         if name == "server_shell":
             return await shell.run(args["command"], min(int(args.get("timeout") or 60), 600))
         if name == "server_job":
