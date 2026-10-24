@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import time
@@ -18,6 +19,8 @@ class Memory:
                 id INTEGER PRIMARY KEY, ts REAL, text TEXT);
             CREATE TABLE IF NOT EXISTS reminders (
                 id INTEGER PRIMARY KEY, due REAL, text TEXT, done INTEGER DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS watchers (
+                id INTEGER PRIMARY KEY, ts REAL, spec TEXT, state TEXT, due REAL);
             """
         )
 
@@ -84,5 +87,26 @@ class Memory:
 
     def finish_reminder(self, reminder_id: int) -> bool:
         cur = self.db.execute("UPDATE reminders SET done = 1 WHERE id = ? AND done = 0", (reminder_id,))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    # Watchers: spec is what to check, state is what the last check saw
+    def add_watcher(self, spec: dict, due: float) -> int:
+        cur = self.db.execute("INSERT INTO watchers (ts, spec, state, due) VALUES (?, ?, '{}', ?)",
+                              (time.time(), json.dumps(spec, ensure_ascii=False), due))
+        self.db.commit()
+        return cur.lastrowid
+
+    def watchers(self) -> list[tuple[int, dict, dict, float]]:
+        rows = self.db.execute("SELECT id, spec, state, due FROM watchers ORDER BY id").fetchall()
+        return [(i, json.loads(spec), json.loads(state), due) for i, spec, state, due in rows]
+
+    def update_watcher(self, watcher_id: int, state: dict, due: float) -> None:
+        self.db.execute("UPDATE watchers SET state = ?, due = ? WHERE id = ?",
+                        (json.dumps(state, ensure_ascii=False), due, watcher_id))
+        self.db.commit()
+
+    def remove_watcher(self, watcher_id: int) -> bool:
+        cur = self.db.execute("DELETE FROM watchers WHERE id = ?", (watcher_id,))
         self.db.commit()
         return cur.rowcount > 0

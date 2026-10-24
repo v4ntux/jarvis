@@ -3,6 +3,7 @@ import asyncio
 import hmac
 import itertools
 import logging
+import time
 
 from aiohttp import WSMsgType, web
 
@@ -19,6 +20,8 @@ class Hub:
         self.ws: web.WebSocketResponse | None = None
         self.pending: dict[int, asyncio.Future] = {}
         self.ids = itertools.count(1)
+        # When the laptop last connected or dropped, for the «laptop is gone» watcher
+        self.since = time.time()
 
     @property
     def online(self) -> bool:
@@ -46,6 +49,7 @@ class Hub:
         if self.online:
             await self.ws.close()
         self.ws = ws
+        self.since = time.time()
         log.info("laptop connected from %s", request.remote)
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
@@ -58,6 +62,7 @@ class Hub:
                 fut.set_result(data)  # text, plus optional image / file+name
         if self.ws is ws:
             self.ws = None
+            self.since = time.time()
             for fut in self.pending.values():
                 if not fut.done():
                     fut.set_result({"text": "Ошибка: ноутбук отключился."})

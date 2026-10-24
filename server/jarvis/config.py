@@ -1,5 +1,9 @@
 import os
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
+
+# The owner lives on Moscow time: reminders, schedules and the daily limit follow it
+TZ = ZoneInfo("Europe/Moscow")
 
 
 @dataclass(frozen=True)

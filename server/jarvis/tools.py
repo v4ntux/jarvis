@@ -66,8 +66,19 @@ SERVER_TOOLS = [
     _t("web_search", "Поиск в интернете (бесплатно, на сервере). news=true для свежих новостей.",
        {"query": S, "limit": I, "news": B}, ["query"]),
     _t("read_url", "Скачать страницу и получить её текст (статьи, документация, новости).", {"url": S}, ["url"]),
-    _t("server_shell", "Команда bash на сервере Jarvis (Ubuntu): расчёты, python, curl, обработка файлов "
-       "из Telegram (лежат в /opt/jarvis/data/inbox).", {"command": S, "timeout": I}, ["command"]),
+    _t("server_shell", "Команда bash на сервере Jarvis (Ubuntu, работает 24/7, ноутбук не нужен): расчёты, python, "
+       "curl, скачивание, обработка файлов. Папка по умолчанию /opt/jarvis/data/work, файлы из Telegram лежат "
+       "в /opt/jarvis/data/inbox. python и pip — твоё собственное окружение, ставь пакеты свободно "
+       "(pip install yt-dlp и т.п.). До 10 минут, дольше — server_job.",
+       {"command": S, "timeout": I}, ["command"]),
+    _t("server_job", "Запустить долгую команду bash на сервере в фоне (скачивание, конвертация, долгий скрипт). "
+       "Ответ сразу, а когда команда закончится, пользователь получит сообщение с концом вывода. "
+       "then — что сделать тебе самому после окончания (например прислать файл), стоит денег.",
+       {"command": S, "what": {"type": "string", "description": "коротко, что делает задача"}, "then": S},
+       ["command", "what"]),
+    _t("server_jobs", "Список фоновых задач на сервере, которые ещё идут."),
+    _t("stop_job", "Остановить фоновую задачу на сервере по номеру.", {"id": I}, ["id"]),
+    _t("server_send_file", "Отправить пользователю в Telegram файл с сервера (до 50 МБ).", {"path": S}, ["path"]),
     _t("remember", "Запомнить факт о пользователе надолго (имена, предпочтения, пути, договорённости).",
        {"text": S}, ["text"]),
     _t("forget", "Удалить факт из памяти по номеру.", {"id": I}, ["id"]),
@@ -75,6 +86,30 @@ SERVER_TOOLS = [
        "Время ISO 8601 по Москве (например 2026-10-25T09:00) или через N минут.",
        {"text": S, "at": S, "in_minutes": I}, ["text"]),
     _t("list_reminders", "Список активных напоминаний."),
+    _t("add_watcher",
+       "Наблюдатель «если случится X — сообщи / сделай Y». Условие проверяется на сервере без ИИ, бесплатно, 24/7. "
+       "source: time — по расписанию (at ЧЧ:ММ по Москве, days: daily|weekdays|weekends|mon,tue,...); "
+       "laptop — команда PowerShell на ноутбуке, только чтение, ошибки глушить -ErrorAction SilentlyContinue; "
+       "server — команда bash на сервере; url — текст страницы; laptop_offline — ноутбук пропал дольше minutes; "
+       "laptop_online — ноутбук снова на связи. "
+       "condition для laptop/server/url: changed (вывод изменился), contains / missing (value есть / нет в выводе), "
+       "below / above (первое число в выводе меньше / больше value), equals (вывод равен value). "
+       "every_min — как часто проверять. once=false — срабатывать каждый раз, по умолчанию один раз и удалить. "
+       "notify — текст уведомления. urgent=true — «позвонить»: голосовые уведомления повторяются, пока "
+       "пользователь не нажмёт «Принял» (настоящих звонков пока нет). task — что сделать тебе самому при "
+       "срабатывании, стоит денег: только если просили действие (утренний бриф, прислать новости). "
+       "Примеры: загрузка закончилась → laptop, command \"(Get-ChildItem $HOME\\Downloads -Filter *.crdownload "
+       "-ErrorAction SilentlyContinue).Count\", condition equals, value 0. Батарея ниже 20% → laptop, "
+       "\"(Get-CimInstance Win32_Battery).EstimatedChargeRemaining\", below 20, once=false.",
+       {"what": {"type": "string", "description": "коротко, что отслеживаем"},
+        "source": {"type": "string", "enum": ["time", "laptop", "server", "url", "laptop_offline", "laptop_online"]},
+        "command": S, "url": S,
+        "condition": {"type": "string", "enum": ["changed", "contains", "missing", "below", "above", "equals"]},
+        "value": S, "every_min": I, "at": S, "days": S, "minutes": I, "once": B,
+        "notify": S, "urgent": B, "task": S},
+       ["what", "source"]),
+    _t("list_watchers", "Список наблюдателей."),
+    _t("remove_watcher", "Удалить наблюдателя по номеру.", {"id": I}, ["id"]),
 ]
 
 LAPTOP_NAMES = {t["name"] for t in LAPTOP_TOOLS}

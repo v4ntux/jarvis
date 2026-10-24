@@ -7,28 +7,31 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable
-from zoneinfo import ZoneInfo
 
 import anthropic
 
-from . import web
-from .config import Config
+from . import shell, watchers, web
+from .config import TZ, Config
 from .hub import HandsOffline, Hub
 from .memory import Memory
 from .tools import LAPTOP_NAMES, TOOLS
 
-TZ = ZoneInfo("Europe/Moscow")
 INBOX = "/opt/jarvis/data/inbox"
 
 SYSTEM = """Ты Джарвис, личный ИИ-помощник как у Тони Старка. Отвечай по-русски, коротко и по делу, с лёгкой иронией.
 Пользователь пишет транслитом и голосом, это нормально.
 
 Твои возможности:
-- Ноутбук пользователя (Windows): run_shell (PowerShell, полный доступ), программы, окна, клавиатура, файлы, look/ui_action для кликов.
-- Сервер: web_search и read_url для интернета, server_shell для расчётов и обработки файлов.
+- Сервер (твой дом, работает 24/7): web_search и read_url для интернета, server_shell и server_job для команд, скриптов,
+  скачивания и обработки файлов, server_send_file чтобы прислать результат. Своё python-окружение, pip install можно.
+- Ноутбук пользователя (Windows, бывает выключен): run_shell (PowerShell, полный доступ), программы, окна, клавиатура,
+  файлы, look/ui_action для кликов.
 - Память: remember/forget для фактов, set_reminder для напоминаний.
+- Наблюдатели (add_watcher): «скажи/позвони, если…», «когда закончится…», «каждое утро в 8…». Проверяются без ИИ.
 
 Как работать:
+- Всё, где не нужен экран ноутбука или его файлы, делай на сервере, даже если ноутбук включён: интернет, скачивание,
+  расчёты, конвертация, отчёты. Ноутбук только для того, что есть лишь на нём.
 - Каждый шаг стоит денег: решай задачу за минимум шагов. Независимые действия вызывай пачкой в одном ответе.
 - ui_action сам возвращает свежий look после действия, отдельный look после него не нужен.
 - Сначала думай, каким самым коротким путём решить задачу. Команда в run_shell почти всегда быстрее и дешевле кликов.
@@ -52,6 +55,8 @@ MAX_RESULT_CHARS = 5000
 CACHED_TOOLS = TOOLS[:-1] + [{**TOOLS[-1], "cache_control": {"type": "ephemeral"}}]
 
 # Commands that destroy data or change the system wait for a button press in Telegram
+CONFIRMED = {"run_shell": "ноутбуке", "server_shell": "сервере", "server_job": "сервере (в фоне)",
+             "add_watcher": "ноутбуке/сервере при каждой проверке наблюдателя"}
 DANGEROUS = re.compile(
     r"remove-item|\brm\b|\bdel\b|\berase\b|\brmdir\b|\brd\b|format-volume|\bformat\b|clear-content|"
     r"stop-computer|restart-computer|\bshutdown\b|\breg\s+(add|delete)|set-itemproperty|remove-itemproperty|"
@@ -114,6 +119,8 @@ class Brain:
         self.memory = memory
         self.hub = hub
         self.client = anthropic.AsyncAnthropic(api_key=cfg.anthropic_key)
+        # Set by the bot: tells the owner about events that happen outside a request (finished jobs)
+        self.notify: Callable[[dict, str], Awaitable[None]] | None = None
 
     def _system(self) -> list[dict]:
         # The stable part is cached across requests; time and laptop state change, so they go after it
@@ -142,8 +149,9 @@ class Brain:
         smart = bool(SMART_WORDS.search(text))
         try:
             for step in range(MAX_STEPS):
-                if self.memory.spent_since(time.time() - 86400) >= self.cfg.daily_limit:
-                    stop_note = f"Остановился: дневной лимит ${self.cfg.daily_limit:.2f} исчерпан."
+                if self.spent_today() >= self.cfg.daily_limit:
+                    stop_note = (f"Остановился: дневной лимит ${self.cfg.daily_limit:.2f} исчерпан, "
+                                 "обнулится в полночь по Москве.")
                     break
                 if spent >= self.cfg.task_limit:
                     stop_note = (f"Остановился: задача стоит уже ${spent:.2f}, лимит ${self.cfg.task_limit:.2f}. "
@@ -192,9 +200,8 @@ class Brain:
 
     async def _run_tool(self, name: str, args: dict, session: Session) -> dict:
         try:
-            if name in ("run_shell", "server_shell") and DANGEROUS.search(args.get("command", "")):
-                where = "ноутбуке" if name == "run_shell" else "сервере"
-                if not await session.confirm(f"Выполнить на {where}?\n\n{args.get('command', '')}"):
+            if name in CONFIRMED and DANGEROUS.search(args.get("command") or ""):
+                if not await session.confirm(f"Выполнить на {CONFIRMED[name]}?\n\n{args['command']}"):
                     return {"text": "Ошибка: пользователь отклонил команду."}
             if name in LAPTOP_NAMES:
                 if name == "put_file":
@@ -204,11 +211,24 @@ class Brain:
                 if out.get("file"):
                     await session.send_file(out.get("name", "file"), base64.b64decode(out["file"]))
                 return out
+            if name == "server_send_file":
+                return await self._send_server_file(args["path"], session)
             return {"text": await self._server_tool(name, args)}
         except HandsOffline as e:
             return {"text": f"Ошибка: {e}"}
         except Exception as e:
             return {"text": f"Ошибка: {type(e).__name__}: {e}"}
+
+    @staticmethod
+    async def _send_server_file(path: str, session: Session) -> dict:
+        path = os.path.join(shell.WORK, os.path.expanduser(path))
+        if not os.path.isfile(path):
+            return {"text": f"Ошибка: на сервере нет файла {path}."}
+        if os.path.getsize(path) > 50 * 1024 * 1024:
+            return {"text": "Ошибка: файл больше 50 МБ, Telegram-бот такие не отправляет. Сожми или разбей."}
+        with open(path, "rb") as f:
+            await session.send_file(os.path.basename(path), f.read())
+        return {"text": f"Отправил {os.path.basename(path)}."}
 
     async def _put_file(self, args: dict) -> dict:
         path = os.path.join(INBOX, os.path.basename(args["inbox_name"]))
@@ -224,7 +244,23 @@ class Brain:
         if name == "read_url":
             return await web.fetch(args["url"])
         if name == "server_shell":
-            return await self._server_shell(args["command"], min(int(args.get("timeout") or 60), 600))
+            return await shell.run(args["command"], min(int(args.get("timeout") or 60), 600))
+        if name == "server_job":
+            job_id = await shell.start_job(args["command"], args["what"], self._job_done(args))
+            return f"Фоновая задача #{job_id} запущена. Когда закончится, придёт сообщение."
+        if name == "server_jobs":
+            return "\n".join(f"#{i} {what}" for i, what in shell.jobs()) or "Фоновых задач нет."
+        if name == "stop_job":
+            return "Остановил." if shell.stop_job(int(args["id"])) else "Ошибка: такой задачи нет или она уже закончилась."
+        if name == "add_watcher":
+            spec = watchers.normalize(args)
+            wid = self.memory.add_watcher(spec, watchers.first_check(spec, time.time()))
+            return f"Наблюдатель #{wid}: {watchers.describe(spec)}."
+        if name == "list_watchers":
+            return "\n".join(f"#{i} {watchers.describe(spec)}" + (f" [ошибка: {st['error']}]" if st.get("error") else "")
+                             for i, spec, st, _ in self.memory.watchers()) or "Наблюдателей нет."
+        if name == "remove_watcher":
+            return "Удалил." if self.memory.remove_watcher(int(args["id"])) else "Ошибка: нет такого наблюдателя."
         if name == "remember":
             return f"Запомнил (#{self.memory.remember(args['text'])})."
         if name == "forget":
@@ -246,16 +282,18 @@ class Brain:
                 or "Напоминаний нет."
         return f"Ошибка: неизвестный инструмент {name}."
 
-    async def _server_shell(self, command: str, timeout: int) -> str:
-        proc = await asyncio.create_subprocess_shell(
-            command, cwd="/opt/jarvis/data", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return f"Ошибка: команда не уложилась в {timeout} с."
-        text = out.decode(errors="replace").strip()
-        return f"(код {proc.returncode})\n{text}" if proc.returncode else text or "(пусто, код 0)"
+    def _job_done(self, args: dict) -> Callable[[int, int, str], Awaitable[None]]:
+        async def done(job_id: int, code: int, tail: str) -> None:
+            status = "закончилась" if code == 0 else f"упала (код {code})"
+            event = {"what": args["what"], "notify": f"Фоновая задача #{job_id} «{args['what']}» {status}.",
+                     "task": args.get("then") or "", "urgent": False}
+            if self.notify:
+                await self.notify(event, tail)
+        return done
+
+    def spent_today(self) -> float:
+        midnight = dt.datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+        return self.memory.spent_since(midnight.timestamp())
 
     def _log_usage(self, model: str, u) -> float:
         # Cache writes cost 1.25x, cache reads 0.1x of normal input
