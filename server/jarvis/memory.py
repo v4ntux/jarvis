@@ -21,6 +21,8 @@ class Memory:
                 id INTEGER PRIMARY KEY, due REAL, text TEXT, done INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS watchers (
                 id INTEGER PRIMARY KEY, ts REAL, spec TEXT, state TEXT, due REAL);
+            CREATE TABLE IF NOT EXISTS phone (
+                id INTEGER PRIMARY KEY, ts REAL, kind TEXT, cost REAL);
             """
         )
 
@@ -110,3 +112,12 @@ class Memory:
         cur = self.db.execute("DELETE FROM watchers WHERE id = ?", (watcher_id,))
         self.db.commit()
         return cur.rowcount > 0
+
+    # SMS and calls cost rubles, counted apart from the AI spend
+    def log_phone(self, kind: str, cost: float) -> None:
+        self.db.execute("INSERT INTO phone (ts, kind, cost) VALUES (?, ?, ?)", (time.time(), kind, cost))
+        self.db.commit()
+
+    def phone_since(self, ts: float) -> tuple[int, float]:
+        return self.db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(cost), 0) FROM phone WHERE ts >= ?", (ts,)).fetchone()

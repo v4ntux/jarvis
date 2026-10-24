@@ -10,8 +10,8 @@ from typing import Awaitable, Callable
 
 import anthropic
 
-from . import shell, watchers, web
-from .config import TZ, Config
+from . import phone, shell, watchers, web
+from .config import TZ, Config, day_start
 from .hub import HandsOffline, Hub
 from .memory import Memory
 from .tools import LAPTOP_NAMES, TOOLS
@@ -27,6 +27,8 @@ SYSTEM = """Ты Джарвис, личный ИИ-помощник как у Т
 - Ноутбук пользователя (Windows, бывает выключен): run_shell (PowerShell, полный доступ), программы, окна, клавиатура,
   файлы, look/ui_action для кликов.
 - Память: remember/forget для фактов, set_reminder для напоминаний.
+- Телефон пользователя (обычная связь, работает и без интернета): send_sms, phone_call. Платно, только когда просят
+  или срочно; Telegram в приоритете.
 - Наблюдатели (add_watcher): «скажи/позвони, если…», «когда закончится…», «каждое утро в 8…». Проверяются без ИИ.
 
 Как работать:
@@ -119,6 +121,7 @@ class Brain:
         self.memory = memory
         self.hub = hub
         self.client = anthropic.AsyncAnthropic(api_key=cfg.anthropic_key)
+        self.phone = phone.Phone(cfg, memory)
         # Set by the bot: tells the owner about events that happen outside a request (finished jobs)
         self.notify: Callable[[dict, str], Awaitable[None]] | None = None
 
@@ -252,6 +255,11 @@ class Brain:
             return "\n".join(f"#{i} {what}" for i, what in shell.jobs()) or "Фоновых задач нет."
         if name == "stop_job":
             return "Остановил." if shell.stop_job(int(args["id"])) else "Ошибка: такой задачи нет или она уже закончилась."
+        if name in ("send_sms", "phone_call"):
+            try:
+                return await (self.phone.sms if name == "send_sms" else self.phone.call)("Джарвис: " + args["text"])
+            except phone.PhoneError as e:
+                return f"Ошибка: {e}"
         if name == "add_watcher":
             spec = watchers.normalize(args)
             wid = self.memory.add_watcher(spec, watchers.first_check(spec, time.time()))
@@ -292,8 +300,7 @@ class Brain:
         return done
 
     def spent_today(self) -> float:
-        midnight = dt.datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-        return self.memory.spent_since(midnight.timestamp())
+        return self.memory.spent_since(day_start())
 
     def _log_usage(self, model: str, u) -> float:
         # Cache writes cost 1.25x, cache reads 0.1x of normal input

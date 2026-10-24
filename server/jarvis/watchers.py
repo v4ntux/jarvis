@@ -58,7 +58,7 @@ def normalize(args: dict) -> dict:
     if not what:
         raise ValueError("нужно what: что отслеживаем, коротко")
     spec = {"what": what, "source": source, "notify": (args.get("notify") or "").strip(),
-            "task": (args.get("task") or "").strip(), "urgent": bool(args.get("urgent"))}
+            "task": (args.get("task") or "").strip(), "urgent": bool(args.get("urgent")), "sms": bool(args.get("sms"))}
     if source == "time":
         at = (args.get("at") or "").strip()
         if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", at):
@@ -104,8 +104,9 @@ def describe(spec: dict) -> str:
         target = spec.get("url") or spec.get("command")
         cond = spec["condition"] + (f" {spec['value']}" if spec["value"] else "")
         when = f"{s}: {target[:80]} → {cond}, каждые {spec['every_min']} мин"
-    flags = ("срочно" if spec.get("urgent") else "") + (", с задачей" if spec.get("task") else "")
-    return f"{spec['what']} ({when}{', ' + flags.lstrip(', ') if flags else ''})"
+    flags = [f for f, on in (("срочно", spec.get("urgent")), ("SMS", spec.get("sms")),
+                             ("с задачей", spec.get("task"))) if on]
+    return f"{spec['what']} ({', '.join([when, *flags])})"
 
 
 def evaluate(spec: dict, output: str, state: dict) -> bool:

@@ -96,7 +96,8 @@ SERVER_TOOLS = [
        "below / above (первое число в выводе меньше / больше value), equals (вывод равен value). "
        "every_min — как часто проверять. once=false — срабатывать каждый раз, по умолчанию один раз и удалить. "
        "notify — текст уведомления. urgent=true — «позвонить»: голосовые уведомления повторяются, пока "
-       "пользователь не нажмёт «Принял» (настоящих звонков пока нет). task — что сделать тебе самому при "
+       "пользователь не нажмёт «Принял», а через 5 минут без ответа — SMS и звонок робота на телефон. sms=true — сразу "
+       "дублировать уведомление по SMS (платно). task — что сделать тебе самому при "
        "срабатывании, стоит денег: только если просили действие (утренний бриф, прислать новости). "
        "Примеры: загрузка закончилась → laptop, command \"(Get-ChildItem $HOME\\Downloads -Filter *.crdownload "
        "-ErrorAction SilentlyContinue).Count\", condition equals, value 0. Батарея ниже 20% → laptop, "
@@ -106,8 +107,12 @@ SERVER_TOOLS = [
         "command": S, "url": S,
         "condition": {"type": "string", "enum": ["changed", "contains", "missing", "below", "above", "equals"]},
         "value": S, "every_min": I, "at": S, "days": S, "minutes": I, "once": B,
-        "notify": S, "urgent": B, "task": S},
+        "notify": S, "urgent": B, "sms": B, "task": S},
        ["what", "source"]),
+    _t("send_sms", "Отправить SMS на телефон пользователя (только ему). Доходит и без интернета. Платно, "
+       "до 300 символов: пиши коротко.", {"text": S}, ["text"]),
+    _t("phone_call", "Позвонить пользователю на обычный телефон: робот прочитает текст. Платно, только по "
+       "просьбе или когда очень срочно.", {"text": S}, ["text"]),
     _t("list_watchers", "Список наблюдателей."),
     _t("remove_watcher", "Удалить наблюдателя по номеру.", {"id": I}, ["id"]),
 ]

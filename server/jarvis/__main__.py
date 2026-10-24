@@ -11,7 +11,7 @@ from aiogram.filters import Command
 from aiogram.types import (BufferedInputFile, CallbackQuery, FSInputFile, InlineKeyboardButton,
                            InlineKeyboardMarkup, Message)
 
-from . import config, voice, watchers
+from . import config, phone, voice, watchers
 from .brain import INBOX, Brain, Session
 from .hub import Hub
 from .memory import Memory
@@ -19,9 +19,6 @@ from .memory import Memory
 log = logging.getLogger("jarvis")
 
 BILLING = "https://console.anthropic.com/settings/billing"
-# No calls from a bot: an urgent event repeats a voice message this many times, this often
-ALARM_REPEATS = 5
-ALARM_EVERY = 120
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 TEXT_EXT = {".txt", ".md", ".csv", ".json", ".py", ".js", ".ts", ".html", ".xml", ".yaml", ".yml", ".log", ".ini"}
 
@@ -130,20 +127,30 @@ async def main() -> None:
             if path and os.path.exists(path):
                 os.unlink(path)
 
+    async def to_phone(text: str, call: bool) -> str:
+        """SMS (and a robot call) to the owner's phone; returns what happened, never raises."""
+        results = []
+        for send in (brain.phone.sms, brain.phone.call) if call else (brain.phone.sms,):
+            try:
+                results.append(await send("Джарвис: " + text))
+            except phone.PhoneError as e:
+                results.append(f"Ошибка: {e}")
+        return "\n".join(results)
+
     async def alarm(text: str) -> None:
-        """A bot cannot call yet: repeat a voice message until the owner presses the button."""
+        """Voice messages in Telegram until «Принял»; no answer in 5 minutes means SMS and a robot call."""
         key = uuid.uuid4().hex[:12]
         acks[key] = heard = asyncio.Event()
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Принял", callback_data=f"ack:{key}")]])
         msg = await bot.send_message(cfg.owner_id, "🚨 " + text[:3500], reply_markup=kb)
+
+        async def escalate() -> None:
+            if brain.phone.ready:
+                report = await to_phone(text, call=True)
+                await bot.send_message(cfg.owner_id, "📵 Ты не ответил, поэтому продублировал на телефон.\n" + report)
+
         try:
-            for _ in range(ALARM_REPEATS):
-                await send_voice(text)
-                try:
-                    await asyncio.wait_for(heard.wait(), ALARM_EVERY)
-                    break
-                except asyncio.TimeoutError:
-                    pass
+            await phone.ring_until_heard(heard, lambda: send_voice(text), escalate)
         finally:
             acks.pop(key, None)
             try:
@@ -162,6 +169,10 @@ async def main() -> None:
             task.add_done_callback(background.discard)
         else:
             await bot.send_message(cfg.owner_id, "🔔 " + text[:4000], disable_web_page_preview=True)
+            if event.get("sms"):
+                report = await to_phone(text, call=False)
+                if report.startswith("Ошибка"):
+                    await bot.send_message(cfg.owner_id, "📵 " + report)
         if event.get("task"):
             # Wait for the owner's own request to finish instead of interrupting it
             while busy():
@@ -195,7 +206,13 @@ async def main() -> None:
         await m.answer("Джарвис на связи. Пиши текстом или голосом, присылай фото и файлы.\n"
                        "Работаю на сервере 24/7, ноутбук нужен только для дел на нём.\n"
                        "/stop прервать · /status ноутбук · /cost расход · /memory что помню · "
-                       "/watchers наблюдатели · /voice голосовые ответы вкл/выкл · /reset забыть разговор")
+                       "/watchers наблюдатели · /phonetest проверить SMS (/phonetest call — звонок) · "
+                       "/voice голосовые ответы вкл/выкл · /reset забыть разговор")
+
+    @dp.message(Command("phonetest"))
+    async def phone_test(m: Message) -> None:
+        call = "call" in (m.text or "").lower()
+        await m.answer(await to_phone("проверка связи. Если слышишь или читаешь это, всё работает.", call=call))
 
     @dp.message(Command("watchers"))
     async def show_watchers(m: Message) -> None:
@@ -229,8 +246,10 @@ async def main() -> None:
     @dp.message(Command("cost"))
     async def cost(m: Message) -> None:
         total = memory.spent_since(0)
+        used, rub = memory.phone_since(config.day_start())
         await m.answer(f"Сегодня: ${brain.spent_today():.4f} из ${cfg.daily_limit:.2f} "
-                       f"(обнуляется в полночь по Москве)\nВсего: ${total:.4f}")
+                       f"(обнуляется в полночь по Москве)\nВсего: ${total:.4f}\n"
+                       f"SMS и звонки сегодня: {used} из {cfg.phone_daily_limit}, {rub:.2f} ₽")
 
     @dp.message(Command("status"))
     async def status(m: Message) -> None:
