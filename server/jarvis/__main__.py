@@ -8,6 +8,7 @@ from aiogram.types import Message
 
 from . import config
 from .brain import Brain
+from .hub import Hub
 from .memory import Memory
 
 log = logging.getLogger("jarvis")
@@ -17,7 +18,9 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = config.load()
     memory = Memory(cfg.db_path)
-    brain = Brain(cfg, memory)
+    hub = Hub(cfg.hands_token)
+    await hub.start(cfg.hands_host, cfg.hands_port)
+    brain = Brain(cfg, memory, hub)
     bot = Bot(cfg.bot_token)
     dp = Dispatcher()
     # Strangers get no reply at all
@@ -37,6 +40,10 @@ async def main() -> None:
         day = memory.spent_since(time.time() - 86400)
         total = memory.spent_since(0)
         await m.answer(f"За сутки: ${day:.4f}\nВсего: ${total:.4f}")
+
+    @dp.message(Command("status"))
+    async def status(m: Message) -> None:
+        await m.answer("Ноутбук: " + ("на связи" if hub.online else "не подключён"))
 
     @dp.message(F.text)
     async def chat(m: Message) -> None:
