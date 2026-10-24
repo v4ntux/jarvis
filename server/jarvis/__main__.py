@@ -359,6 +359,11 @@ async def main() -> None:
     asyncio.create_task(reminders_loop())
     brain.notify = on_event
     hub.on_ask, hub.on_stop = ask_from_laptop, stop_task
+
+    async def laptop_notice(text: str) -> None:
+        await send_long(cfg.owner_id, "💻 " + text)
+
+    hub.on_notice = laptop_notice
     asyncio.create_task(watchers.Watchers(memory, hub, on_event).loop())
     log.info("starting, model=%s smart=%s", cfg.model, cfg.smart_model)
     await dp.start_polling(bot)

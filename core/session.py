@@ -4,7 +4,8 @@ import uuid
 import re
 from contextlib import nullcontext
 
-from core import actions, ai, desktop_lock, ears as ears_module, memory, router, server_link, settings as cfg, skills
+from core import (actions, ai, desktop_lock, ears as ears_module, memory, router, routines, server_link,
+                  settings as cfg, skills)
 
 
 SLEEP_MARK = "__SLEEP__"
@@ -64,7 +65,7 @@ class Session:
         self._clipboard_backup = None
         self.last_reply_question = False
         self.state = "idle"
-        self.stats = {"rules": 0, "learned": 0, "ai": 0, "server": 0, "unknown": 0,
+        self.stats = {"rules": 0, "learned": 0, "routines": 0, "ai": 0, "server": 0, "unknown": 0,
                       "wake_candidates": 0, "wake_verified": 0, "cloud_stt": 0}
 
     def _ui(self, **fields):
@@ -179,6 +180,10 @@ class Session:
             return True
 
         self._ui(status="thinking", action="", progress="Разбираю запрос")
+        routine = routines.match_command(text)
+        if routine:
+            self._run_routine(routine)
+            return True
         # Learned complete phrases retain explicitly chosen app aliases. Never
         # reuse a contextual 'это/его/туда' instruction as a static command.
         learned, params = memory.lookup(text, exact=True)
@@ -344,6 +349,17 @@ class Session:
                     actions.clipboard_set(self._clipboard_backup)
                     self._clipboard_backup = None
                     self._say("Предыдущий буфер восстановлен.")
+        self.extend("action")
+
+    def _run_routine(self, name):
+        """A routine the owner showed once runs right here: no server, no AI, works offline."""
+        self.stats["routines"] += 1
+        self._ui(status="acting", action="Приём «%s»" % name, progress="Повторяю приём")
+        try:
+            result = routines.replay(name, stop_flag=self._cancelled)
+        except actions.ActionError as exc:
+            result = "Ошибка: %s" % exc
+        self._say(result)
         self.extend("action")
 
     def _ask_server(self, text):

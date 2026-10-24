@@ -30,6 +30,10 @@ class Hub:
         # Set by the bot: answer a question spoken at the laptop, stop the current task
         self.on_ask: Callable[[str], Awaitable[str]] | None = None
         self.on_stop: Callable[[], bool] | None = None
+        # The laptop reports on its own: its learned routines, and news for the owner
+        self.routines: list[str] = []
+        self.on_notice: Callable[[str], Awaitable[None]] | None = None
+        self._notices: set[asyncio.Task] = set()
 
     @property
     def online(self) -> bool:
@@ -77,6 +81,14 @@ class Hub:
             if msg.type != WSMsgType.TEXT:
                 continue
             data = msg.json()
+            if data.get("event") == "routines":
+                self.routines = [str(n) for n in data.get("names") or []][:100]
+                continue
+            if data.get("event") == "notice" and self.on_notice:
+                task = asyncio.create_task(self.on_notice(str(data.get("text", ""))[:3500]))
+                self._notices.add(task)
+                task.add_done_callback(self._notices.discard)
+                continue
             fut = self.pending.get(data.get("id"))
             if fut and not fut.done():
                 data.pop("id")

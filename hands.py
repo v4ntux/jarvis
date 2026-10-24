@@ -17,7 +17,7 @@ import time
 
 import aiohttp
 
-from core import actions, desktop, server_link
+from core import actions, desktop, routines, server_link
 
 ALLOWED = {
     "open_app", "close_app", "type_text", "hotkey", "list_windows", "focus_window",
@@ -124,9 +124,37 @@ def put_file(path, data):
     return "Сохранил %s." % path
 
 
+def record_routine(name):
+    return routines.start_recording(name)
+
+
+def stop_recording():
+    return routines.stop_recording()
+
+
+def run_routine(name):
+    if not routines.find(name):
+        return {"text": "Ошибка: приёма «%s» нет. Есть: %s." % (name, ", ".join(routines.names()) or "пока ни одного"),
+                "missing": True}
+    return routines.replay(name)
+
+
+def list_routines():
+    found = routines.names()
+    return "Выученные приёмы: %s." % ", ".join(found) if found else "Приёмов пока нет."
+
+
+def forget_routine(name):
+    return "Забыл приём." if routines.forget(name) else "Ошибка: такого приёма нет."
+
+
 # Laptop-side tools that are not plain core/actions functions
 LOCAL = {"add_app": add_app, "open_app": open_app, "run_shell": run_shell, "read_file": read_file,
-         "write_file": write_file, "send_file": send_file, "send_screen": send_screen, "put_file": put_file}
+         "write_file": write_file, "send_file": send_file, "send_screen": send_screen, "put_file": put_file,
+         "record_routine": record_routine, "stop_recording": stop_recording, "run_routine": run_routine,
+         "list_routines": list_routines, "forget_routine": forget_routine}
+# After these the brain's list of routines is out of date
+CHANGES_ROUTINES = {"stop_recording", "forget_routine", "record_routine"}
 
 
 class Worker(threading.Thread):
@@ -210,6 +238,16 @@ async def serve(worker):
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(SERVER, headers=headers, heartbeat=20) as ws:
             log.info("connected to %s", SERVER)
+            # The brain keeps the routine names in its prompt: running one costs no extra step
+            await ws.send_json({"event": "routines", "names": routines.names()})
+            loop = asyncio.get_running_loop()
+
+            async def recorded(text):
+                await ws.send_json({"event": "notice", "text": text})
+                await ws.send_json({"event": "routines", "names": routines.names()})
+
+            # A recording stopped by Ctrl+Alt+R ends on the recorder's thread, not in a tool call
+            routines.on_finish = lambda text: asyncio.run_coroutine_threadsafe(recorded(text), loop)
             async for msg in ws:
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     continue
@@ -218,6 +256,8 @@ async def serve(worker):
                 result = await worker.submit(data.get("tool"), data.get("args") or {})
                 log.info("<- %s", result["text"][:300])
                 await ws.send_json({"id": data.get("id"), **result})
+                if data.get("tool") in CHANGES_ROUTINES:
+                    await ws.send_json({"event": "routines", "names": routines.names()})
 
 
 async def open_tunnel():
