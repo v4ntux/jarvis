@@ -6,7 +6,7 @@ import threading
 import time
 import traceback
 
-from core import actions, router, skills
+from core import actions, router, server_link, skills
 
 
 @dataclass(frozen=True)
@@ -103,6 +103,9 @@ class AssistantRuntime:
     def cancel(self, include_tasks=True):
         self.cancelled.set()
         self.session.voice.stop()
+        if server_link.enabled():
+            # The server may be mid-task on our behalf; stopping it must not block the hotkey
+            threading.Thread(target=server_link.stop, daemon=True).start()
         if include_tasks and self.task_manager:
             self.task_manager.cancel_all()
         while True:

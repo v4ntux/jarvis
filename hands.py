@@ -17,7 +17,7 @@ import time
 
 import aiohttp
 
-from core import actions, desktop, settings  # noqa: F401  settings loads .env
+from core import actions, desktop, server_link
 
 ALLOWED = {
     "open_app", "close_app", "type_text", "hotkey", "list_windows", "focus_window",
@@ -25,14 +25,10 @@ ALLOWED = {
     "system_status", "disk_status", "open_folder", "find_files", "open_path",
     "minimize_window", "maximize_window", "show_desktop", "clipboard_get", "clipboard_set",
 }
-TOKEN = os.environ.get("JARVIS_HANDS_TOKEN", "")
-# AmneziaVPN blocks Tailscale TCP, so by default we reach the hub through SSH,
-# which already works. Empty JARVIS_SSH means connect to JARVIS_SERVER directly.
-SSH_TARGET = os.environ.get("JARVIS_SSH", "administrator@85.190.96.176")
-HUB = os.environ.get("JARVIS_HUB", "100.115.94.31:8765")
-LOCAL_PORT = 18765
-SERVER = os.environ.get("JARVIS_SERVER") or (
-    "ws://127.0.0.1:%d/hands" % LOCAL_PORT if SSH_TARGET else "ws://%s/hands" % HUB)
+TOKEN = server_link.TOKEN
+SSH_TARGET, HUB, LOCAL_PORT = server_link.SSH_TARGET, server_link.HUB, server_link.LOCAL_PORT
+# The voice and the panel (jarvis.py) talk to the brain through the same tunnel
+SERVER = os.environ.get("JARVIS_SERVER") or server_link.BASE.replace("http", "ws", 1) + "/hands"
 
 log = logging.getLogger("hands")
 

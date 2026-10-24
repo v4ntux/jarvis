@@ -1,9 +1,14 @@
-"""WebSocket hub: the laptop connects here (inside Tailscale) and executes tools."""
+"""Hub for the laptop (inside Tailscale or an SSH tunnel).
+
+/hands  WebSocket: the laptop executes the brain's tools.
+/ask    the laptop's own voice and chat panel ask the brain; /stop cancels.
+"""
 import asyncio
 import hmac
 import itertools
 import logging
 import time
+from typing import Awaitable, Callable
 
 from aiohttp import WSMsgType, web
 
@@ -22,6 +27,9 @@ class Hub:
         self.ids = itertools.count(1)
         # When the laptop last connected or dropped, for the «laptop is gone» watcher
         self.since = time.time()
+        # Set by the bot: answer a question spoken at the laptop, stop the current task
+        self.on_ask: Callable[[str], Awaitable[str]] | None = None
+        self.on_stop: Callable[[], bool] | None = None
 
     @property
     def online(self) -> bool:
@@ -41,9 +49,23 @@ class Hub:
         finally:
             self.pending.pop(call_id, None)
 
-    async def handle(self, request: web.Request) -> web.WebSocketResponse:
+    def _check(self, request: web.Request) -> None:
         if not hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + self.token):
             raise web.HTTPUnauthorized()
+
+    async def ask(self, request: web.Request) -> web.Response:
+        self._check(request)
+        text = str((await request.json()).get("text") or "").strip()
+        if not text or not self.on_ask:
+            raise web.HTTPBadRequest()
+        return web.json_response({"answer": await self.on_ask(text)})
+
+    async def stop(self, request: web.Request) -> web.Response:
+        self._check(request)
+        return web.json_response({"stopped": bool(self.on_stop and self.on_stop())})
+
+    async def handle(self, request: web.Request) -> web.WebSocketResponse:
+        self._check(request)
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=32 * 1024 * 1024)  # screenshots
         await ws.prepare(request)
         if self.online:
@@ -72,6 +94,8 @@ class Hub:
     async def start(self, host: str, port: int) -> None:
         app = web.Application()
         app.router.add_get("/hands", self.handle)
+        app.router.add_post("/ask", self.ask)
+        app.router.add_post("/stop", self.stop)
         runner = web.AppRunner(app)
         await runner.setup()
         await web.TCPSite(runner, host, port).start()

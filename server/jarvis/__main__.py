@@ -50,7 +50,7 @@ async def main() -> None:
             text = "⚙️ Работаю…\n" + "\n".join(status["lines"])
             try:
                 if status["msg"] is None:
-                    status["msg"] = await bot.send_message(chat_id, text)
+                    status["msg"] = await bot.send_message(chat_id, text, disable_notification=True)
                 else:
                     await status["msg"].edit_text(text)
             except TelegramBadRequest:
@@ -86,10 +86,13 @@ async def main() -> None:
     def busy() -> bool:
         return bool(state["task"] and not state["task"].done())
 
-    async def respond(chat_id: int, text: str, images: list[str] | None = None, spoken: bool = False) -> None:
+    async def run_brain(chat_id: int, text: str, images: list[str] | None = None) -> str | None:
+        """One request through the brain; progress and confirmations go to this Telegram chat.
+
+        None when the brain is busy. The check and the start happen with no await in between.
+        """
         if busy():
-            await bot.send_message(chat_id, "Я ещё занят прошлой задачей. /stop — прервать её.")
-            return
+            return None
         session = make_session(chat_id)
         state["task"] = asyncio.create_task(brain.reply(text, session, images))
         await bot.send_chat_action(chat_id, "typing")
@@ -111,10 +114,43 @@ async def main() -> None:
                     await session.status["msg"].delete()
                 except TelegramBadRequest:
                     pass
-        for i in range(0, len(answer), 4000):
-            await bot.send_message(chat_id, answer[i: i + 4000], disable_web_page_preview=True)
+        return answer
+
+    async def send_long(chat_id: int, text: str, quiet: bool = False) -> None:
+        for i in range(0, len(text), 4000):
+            await bot.send_message(chat_id, text[i: i + 4000], disable_web_page_preview=True,
+                                   disable_notification=quiet)
+
+    async def respond(chat_id: int, text: str, images: list[str] | None = None, spoken: bool = False) -> None:
+        answer = await run_brain(chat_id, text, images)
+        if answer is None:
+            await bot.send_message(chat_id, "Я ещё занят прошлой задачей. /stop — прервать её.")
+            return
+        await send_long(chat_id, answer)
         if spoken and state["voice_replies"]:
             await send_voice(answer)
+
+    async def ask_from_laptop(text: str) -> str:
+        """The laptop's voice or panel asks; the laptop speaks the answer, Telegram keeps a quiet copy."""
+        busy_text = "Я ещё занят прошлой задачей. Скажи «стоп», чтобы прервать её."
+        if busy():
+            return busy_text
+        await bot.send_message(cfg.owner_id, f"🎙 С ноутбука: {text}"[:4000], disable_notification=True)
+        answer = await run_brain(cfg.owner_id, f"[голосом у ноутбука] {text}")
+        if answer is None:
+            return busy_text
+        await send_long(cfg.owner_id, answer, quiet=True)
+        return answer
+
+    def stop_task() -> bool:
+        task = state["task"]
+        if not task or task.done():
+            return False
+        task.cancel()
+        for fut in confirms.values():
+            if not fut.done():
+                fut.set_result(False)
+        return True
 
     async def send_voice(text: str) -> None:
         path = None
@@ -229,13 +265,7 @@ async def main() -> None:
 
     @dp.message(Command("stop"))
     async def stop(m: Message) -> None:
-        task = state["task"]
-        if task and not task.done():
-            task.cancel()
-            for fut in confirms.values():
-                if not fut.done():
-                    fut.set_result(False)
-        else:
+        if not stop_task():
             await m.answer("Сейчас ничего не выполняю.")
 
     @dp.message(Command("reset"))
@@ -328,6 +358,7 @@ async def main() -> None:
 
     asyncio.create_task(reminders_loop())
     brain.notify = on_event
+    hub.on_ask, hub.on_stop = ask_from_laptop, stop_task
     asyncio.create_task(watchers.Watchers(memory, hub, on_event).loop())
     log.info("starting, model=%s smart=%s", cfg.model, cfg.smart_model)
     await dp.start_polling(bot)

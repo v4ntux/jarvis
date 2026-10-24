@@ -3,13 +3,15 @@
 Главное, что здесь доказывается: новая фраза обращается к мозгу ровно один раз.
 Второй раз та же фраза исполняется из памяти, без сети.
 """
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from core import ai, memory, session as session_module, skills
+os.environ["JARVIS_SERVER_BRAIN"] = "0"  # tests never talk to the real server brain
+from core import ai, memory, server_link, session as session_module, skills
 
 
 class FakeVoice:
@@ -95,6 +97,41 @@ class LearningTests(unittest.TestCase):
             self.session.handle("как считаешь, стоит ли учить питон")
         self.assertEqual(memory.count(), 0, "разговор запоминать нельзя")
         self.assertIn("Думаю, да.", self.voice.said)
+
+    def test_server_brain_answers_what_local_rules_cannot(self):
+        with mock.patch.object(server_link, "enabled", return_value=True), \
+             mock.patch.object(server_link, "ask", return_value=("Осень пришла.", 0.01)) as ask, \
+             mock.patch.object(ai, "resolve") as resolve:
+            self.session.handle("сочини стихотворение про осень")
+        ask.assert_called_once_with("сочини стихотворение про осень")
+        resolve.assert_not_called()
+        self.assertEqual(self.session.stats["server"], 1)
+        self.assertIn("Осень пришла.", self.voice.said)
+
+    def test_local_rules_still_skip_the_server(self):
+        with mock.patch.object(server_link, "enabled", return_value=True), \
+             mock.patch.object(server_link, "ask") as ask:
+            self.session.handle("который час")
+        ask.assert_not_called()
+        self.assertEqual(self.session.stats["rules"], 1)
+
+    def test_server_down_falls_back_to_old_ai(self):
+        down = server_link.ServerUnavailable("connection refused")
+        with mock.patch.object(server_link, "enabled", return_value=True), \
+             mock.patch.object(server_link, "ask", side_effect=down), \
+             mock.patch.object(ai, "enabled", return_value=True), \
+             mock.patch.object(ai, "chain", return_value=["gemini"]), \
+             mock.patch.object(ai, "last_provider", return_value="gemini"), \
+             mock.patch.object(ai, "resolve", return_value=(None, {}, "Запасной ответ.")):
+            self.session.handle("сочини стихотворение про осень")
+        self.assertIn("Запасной ответ.", self.voice.said)
+
+    def test_server_down_without_ai_says_only_local_commands_work(self):
+        with mock.patch.object(server_link, "enabled", return_value=True), \
+             mock.patch.object(server_link, "ask", side_effect=server_link.ServerUnavailable("x")), \
+             mock.patch.object(ai, "enabled", return_value=False):
+            self.session.handle("сочини стихотворение про осень")
+        self.assertTrue(any("Сервер недоступен" in phrase for phrase in self.voice.said))
 
     def test_without_ai_says_so(self):
         with mock.patch.object(ai, "enabled", return_value=False):

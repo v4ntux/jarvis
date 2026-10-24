@@ -4,7 +4,7 @@ import uuid
 import re
 from contextlib import nullcontext
 
-from core import actions, ai, desktop_lock, ears as ears_module, memory, router, settings as cfg, skills
+from core import actions, ai, desktop_lock, ears as ears_module, memory, router, server_link, settings as cfg, skills
 
 
 SLEEP_MARK = "__SLEEP__"
@@ -64,7 +64,7 @@ class Session:
         self._clipboard_backup = None
         self.last_reply_question = False
         self.state = "idle"
-        self.stats = {"rules": 0, "learned": 0, "ai": 0, "unknown": 0,
+        self.stats = {"rules": 0, "learned": 0, "ai": 0, "server": 0, "unknown": 0,
                       "wake_candidates": 0, "wake_verified": 0, "cloud_stt": 0}
 
     def _ui(self, **fields):
@@ -190,6 +190,9 @@ class Session:
         if result.handled:
             self.stats["rules"] += 1
             self._deliver_rule(result)
+            return True
+        if server_link.enabled():
+            self._ask_server(text)
             return True
         if ai.enabled() and ai.chain():
             self._ask_ai(text)
@@ -342,6 +345,29 @@ class Session:
                     self._clipboard_backup = None
                     self._say("Предыдущий буфер восстановлен.")
         self.extend("action")
+
+    def _ask_server(self, text):
+        """Jarvis 3.0: the server brain answers and acts through hands.py on this laptop."""
+        self._ui(status="thinking", action="Думаю", progress="Спрашиваю сервер")
+        started = time.time()
+        try:
+            answer, cost = server_link.ask(text)
+        except server_link.ServerUnavailable as exc:
+            self.log("  [server unavailable: %s]" % exc)
+            if ai.enabled() and ai.chain():
+                self._ask_ai(text)
+                return
+            self._say("Сервер недоступен, работают только локальные команды. Проверьте, что запущены руки.")
+            self._ui(error="Сервер недоступен: %s" % exc)
+            self.extend("normal")
+            return
+        if self._cancelled():
+            return
+        self.stats["server"] += 1
+        self._ui(provider="сервер" + (" $%.2f" % cost if cost else ""),
+                 provider_latency=round(time.time() - started, 1))
+        self._say(answer or "Готово.")
+        self.extend("question" if self.last_reply_question else "normal")
 
     def _ask_ai(self, text):
         self._ui(status="thinking", action="Думаю", progress="Обращаюсь к AI")

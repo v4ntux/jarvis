@@ -1,9 +1,11 @@
 """Runtime recovery/cancellation checks without opening audio or touching Windows."""
+import os
 import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
 
+os.environ["JARVIS_SERVER_BRAIN"] = "0"  # tests never talk to the real server brain
 from core.runtime import AssistantRuntime
 from ui.island import UiState
 

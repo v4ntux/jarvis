@@ -1,12 +1,14 @@
 """Computer-agent regressions: fake desktop and fake AI, never Windows injection."""
 import copy
 import json
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
+os.environ["JARVIS_SERVER_BRAIN"] = "0"  # tests never talk to the real server brain
 from core import ai, memory, skills
 from core.computer_agent import ComputerAgent
 from core.session import Session

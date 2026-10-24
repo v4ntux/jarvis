@@ -7,6 +7,7 @@ import time
 import unittest
 from unittest import mock
 
+os.environ["JARVIS_SERVER_BRAIN"] = "0"  # tests never talk to the real server brain
 from core import desktop, desktop_lock, skills
 
 

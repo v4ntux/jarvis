@@ -1,5 +1,6 @@
 """Audio pipeline checks use generated samples/fake streams, never user audio."""
 import asyncio
+import os
 import threading
 import time
 import types
@@ -8,6 +9,7 @@ from unittest import mock
 
 import numpy as np
 
+os.environ["JARVIS_SERVER_BRAIN"] = "0"  # tests never talk to the real server brain
 from core import ears, voice
 from core import prepare_voice
 

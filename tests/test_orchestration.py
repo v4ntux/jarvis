@@ -4,12 +4,14 @@ All action and network boundaries are replaced. These tests never control Window
 """
 import json
 from contextlib import nullcontext
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+os.environ["JARVIS_SERVER_BRAIN"] = "0"  # tests never talk to the real server brain
 from core import actions, ai, memory, router, skills
 from core.session import Session
 

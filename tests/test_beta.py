@@ -1,10 +1,12 @@
 """Jarvis 1.0 Beta invariants: strict wake, bounded confirmation and SQLite services."""
+import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+os.environ["JARVIS_SERVER_BRAIN"] = "0"  # tests never talk to the real server brain
 from core import ai, memory, router, skills
 from core import actions
 from core.session import ConversationEndDetector, Session
