@@ -13,6 +13,9 @@ class Config:
     history_limit: int
     # USD per million tokens (input, output) for (model, smart_model); only for the spend counter
     prices: tuple[tuple[float, float], tuple[float, float]]
+    # USD caps: one request, and everything in the last 24 hours
+    task_limit: float
+    daily_limit: float
     hands_token: str
     hands_host: str
     hands_port: int
@@ -31,6 +34,8 @@ def load() -> Config:
             (float(os.environ.get("PRICE_IN", "1")), float(os.environ.get("PRICE_OUT", "5"))),
             (float(os.environ.get("SMART_PRICE_IN", "3")), float(os.environ.get("SMART_PRICE_OUT", "15"))),
         ),
+        task_limit=float(os.environ.get("TASK_LIMIT", "0.30")),
+        daily_limit=float(os.environ.get("DAILY_LIMIT", "2")),
         hands_token=os.environ["HANDS_TOKEN"],
         # Tailscale address only: the hub is never exposed to the internet
         hands_host=os.environ.get("HANDS_HOST", "100.115.94.31"),

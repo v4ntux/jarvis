@@ -4,6 +4,7 @@ The server decides, the laptop executes. Only functions in ALLOWED can run,
 whatever the server asks for.
 """
 import asyncio
+import json
 import logging
 import os
 import queue
@@ -32,6 +33,42 @@ SERVER = os.environ.get("JARVIS_SERVER") or (
 
 log = logging.getLogger("hands")
 
+# Apps installed outside Start menu, taught by the user: {"telegram": "D:\\...\\Telegram.exe"}
+APPS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "apps.json")
+
+
+def _apps():
+    try:
+        with open(APPS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def add_app(name, path):
+    if not os.path.isfile(path):
+        raise actions.ActionError("Файла %s нет." % path)
+    apps = _apps()
+    apps[name.strip().lower()] = path
+    with open(APPS_FILE, "w", encoding="utf-8") as f:
+        json.dump(apps, f, ensure_ascii=False, indent=1)
+    return "Запомнил: «%s» → %s." % (name, path)
+
+
+def open_app(name):
+    path = _apps().get(str(name).strip().lower())
+    if path:
+        # Launching a running single-instance app (Telegram) brings its window back from the tray
+        previous = actions.foreground_window()
+        os.startfile(path)
+        actions._after_launch(previous, os.path.splitext(os.path.basename(path))[0])
+        return "Запускаю %s." % name
+    return actions.open_app(name)
+
+
+# Laptop-side tools that are not plain core/actions functions
+LOCAL = {"add_app": add_app, "open_app": open_app}
+
 
 class Worker(threading.Thread):
     """One thread runs every action, so the selected window survives between calls."""
@@ -49,7 +86,7 @@ class Worker(threading.Thread):
     @staticmethod
     def _execute(tool, args):
         """Returns {"text": ...} plus "image" (base64 PNG) when a screenshot was taken."""
-        if tool not in ALLOWED and tool not in ("look", "ui_action"):
+        if tool not in ALLOWED and tool not in ("look", "ui_action", "add_app"):
             return {"text": "Ошибка: инструмент %s запрещён на ноутбуке." % tool}
         try:
             if tool == "look":
@@ -57,7 +94,7 @@ class Worker(threading.Thread):
             if tool == "ui_action":
                 res = desktop.execute(args.get("action"), args.get("params") or {}, args.get("snapshot_id"))
                 return {"text": ("" if res.ok else "Ошибка: ") + res.message}
-            result = getattr(actions, tool)(**args)
+            result = (LOCAL.get(tool) or getattr(actions, tool))(**args)
         except actions.ActionError as e:
             return {"text": "Ошибка: %s" % e}
         except Exception as e:
