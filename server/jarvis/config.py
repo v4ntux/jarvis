@@ -29,7 +29,7 @@ def load() -> Config:
         model=os.environ.get("JARVIS_MODEL", "claude-haiku-5-5"),
         smart_model=os.environ.get("JARVIS_SMART_MODEL", "claude-sonnet-5-5"),
         db_path=os.environ.get("JARVIS_DB", "/opt/jarvis/data/jarvis.db"),
-        history_limit=int(os.environ.get("JARVIS_HISTORY", "20")),
+        history_limit=int(os.environ.get("JARVIS_HISTORY", "10")),
         prices=(
             (float(os.environ.get("PRICE_IN", "1")), float(os.environ.get("PRICE_OUT", "5"))),
             (float(os.environ.get("SMART_PRICE_IN", "3")), float(os.environ.get("SMART_PRICE_OUT", "15"))),

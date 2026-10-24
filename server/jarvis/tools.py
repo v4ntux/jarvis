@@ -52,8 +52,8 @@ LAPTOP_TOOLS = [
     _t("look", "Посмотреть на активное окно: список кнопок, ссылок, полей с id и координатами. "
        "Дёшево, используй перед ui_action. screenshot=true добавляет картинку окна, "
        "это дорого: только если по списку элементов не понять, куда нажать.", {"screenshot": B}),
-    _t("ui_action", "Действие с элементом из последнего look. После каждого действия снимок сбрасывается, "
-       "для следующего действия снова вызови look. Действия: click_element {element_id, button?, count?}, "
+    _t("ui_action", "Действие с элементом из последнего look. Результат сразу содержит свежий look окна "
+       "с новым snapshot_id для следующего действия. Действия: click_element {element_id, button?, count?}, "
        "type_into_element {element_id, text}, scroll {element_id, direction: up|down, amount}, "
        "press_key {keys}, click_at {x, y} (координаты на скриншоте, только после look со screenshot).",
        {"action": {"type": "string",

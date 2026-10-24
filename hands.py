@@ -13,6 +13,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 
 import aiohttp
 
@@ -155,7 +156,15 @@ class Worker(threading.Thread):
                 return look(bool(args.get("screenshot")))
             if tool == "ui_action":
                 res = desktop.execute(args.get("action"), args.get("params") or {}, args.get("snapshot_id"))
-                return {"text": ("" if res.ok else "Ошибка: ") + res.message}
+                if not res.ok:
+                    return {"text": "Ошибка: " + res.message}
+                # Hand back the next look right away: saves the brain a whole round trip
+                time.sleep(0.6)
+                try:
+                    after = look(False)["text"]
+                except actions.ActionError as e:
+                    after = "(не удалось посмотреть: %s)" % e
+                return {"text": res.message + "\n\nПосле действия:\n" + after}
             result = (LOCAL.get(tool) or getattr(actions, tool))(**args)
         except actions.ActionError as e:
             return {"text": "Ошибка: %s" % e}
@@ -181,9 +190,9 @@ def look(screenshot):
         if not (el["name"] or el["value"] or el["editable"]):
             continue
         b = el["bounds"]
-        line = "%s %s «%s»" % (el["id"], el["role"], el["name"][:80])
+        line = "%s %s «%s»" % (el["id"], el["role"], el["name"][:60])
         if el["value"]:
-            line += " = «%s»" % el["value"][:80]
+            line += " = «%s»" % el["value"][:60]
         if el["editable"]:
             line += " [поле ввода]"
         if not el["enabled"]:

@@ -29,6 +29,8 @@ SYSTEM = """Ты Джарвис, личный ИИ-помощник как у Т
 - Память: remember/forget для фактов, set_reminder для напоминаний.
 
 Как работать:
+- Каждый шаг стоит денег: решай задачу за минимум шагов. Независимые действия вызывай пачкой в одном ответе.
+- ui_action сам возвращает свежий look после действия, отдельный look после него не нужен.
 - Сначала думай, каким самым коротким путём решить задачу. Команда в run_shell почти всегда быстрее и дешевле кликов.
 - Клики (look → ui_action) только для того, что нельзя сделать командой: интерфейсы программ, сайты под логином.
 - Скриншот (look со screenshot=true) дорогой: только если список элементов не помог.
@@ -40,11 +42,12 @@ SYSTEM = """Ты Джарвис, личный ИИ-помощник как у Т
 - Отправка сообщений людям от имени пользователя — только если он сам об этом попросил."""
 
 MAX_STEPS = 40
-# Easy chat stays on the cheap model; real multi-step work moves to the smart one
-ESCALATE_AFTER = 3
+# Everything runs on the cheap model; the smart one only when asked or when the cheap one keeps failing
+ESCALATE_ON_ERRORS = 3
+SMART_WORDS = re.compile(r"подумай|хорошенько|умн(ее|ую)|sonnet|podumay|horoshenko", re.I)
 # Only the newest screenshots stay in context; older ones are the main cost driver
 KEEP_IMAGES = 1
-MAX_RESULT_CHARS = 8000
+MAX_RESULT_CHARS = 5000
 # Cache the whole tool catalog: the breakpoint goes on the last tool
 CACHED_TOOLS = TOOLS[:-1] + [{**TOOLS[-1], "cache_control": {"type": "ephemeral"}}]
 
@@ -112,15 +115,18 @@ class Brain:
         self.hub = hub
         self.client = anthropic.AsyncAnthropic(api_key=cfg.anthropic_key)
 
-    def _system(self) -> str:
-        now = dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M, %A")
-        parts = [SYSTEM, f"\nСейчас {now} (Москва)."]
-        if not self.hub.online:
-            parts.append("Ноутбук сейчас НЕ подключён: инструменты ноутбука не работают.")
+    def _system(self) -> list[dict]:
+        # The stable part is cached across requests; time and laptop state change, so they go after it
+        stable = SYSTEM
         facts = self.memory.facts()
         if facts:
-            parts.append("\nЧто ты знаешь о пользователе:\n" + "\n".join(f"#{i}: {t}" for i, t in facts))
-        return "\n".join(parts)
+            stable += "\n\nЧто ты знаешь о пользователе:\n" + "\n".join(f"#{i}: {t}" for i, t in facts)
+        now = dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M, %A")
+        live = f"Сейчас {now} (Москва)."
+        if not self.hub.online:
+            live += " Ноутбук сейчас НЕ подключён: инструменты ноутбука не работают."
+        return [{"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": live}]
 
     async def reply(self, text: str, session: Session, images: list[str] | None = None) -> str:
         self.memory.add("user", text)
@@ -132,7 +138,8 @@ class Brain:
                   for b in images),
                 {"type": "text", "text": text}]}
         system = self._system()
-        answer, spent, stop_note, log = "", 0.0, "", []
+        answer, spent, stop_note, log, errors = "", 0.0, "", [], 0
+        smart = bool(SMART_WORDS.search(text))
         try:
             for step in range(MAX_STEPS):
                 if self.memory.spent_since(time.time() - 86400) >= self.cfg.daily_limit:
@@ -142,7 +149,7 @@ class Brain:
                     stop_note = (f"Остановился: задача стоит уже ${spent:.2f}, лимит ${self.cfg.task_limit:.2f}. "
                                  "Напиши «продолжай», если нужно.")
                     break
-                model = self.cfg.model if step < ESCALATE_AFTER else self.cfg.smart_model
+                model = self.cfg.smart_model if smart or errors >= ESCALATE_ON_ERRORS else self.cfg.model
                 _prune_images(messages)
                 _mark_cache(messages)
                 resp = await self.client.messages.create(
@@ -160,6 +167,7 @@ class Brain:
                     out = await self._run_tool(block.name, block.input, session)
                     ok = not out["text"].startswith("Ошибка")
                     log.append(f"{block.name}{'' if ok else ' ✗'}")
+                    errors += not ok
                     text_out = out["text"] or "(пусто)"
                     if len(text_out) > MAX_RESULT_CHARS:
                         text_out = text_out[:MAX_RESULT_CHARS] + "\n…(обрезано)"
