@@ -24,7 +24,7 @@ class Hub:
     def online(self) -> bool:
         return self.ws is not None and not self.ws.closed
 
-    async def call(self, tool: str, args: dict, timeout: float = 60) -> str:
+    async def call(self, tool: str, args: dict, timeout: float = 60) -> dict:
         if not self.online:
             raise HandsOffline("Ноутбук не подключён.")
         call_id = next(self.ids)
@@ -34,14 +34,14 @@ class Hub:
             await self.ws.send_json({"id": call_id, "tool": tool, "args": args})
             return await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
-            return "Ошибка: ноутбук не ответил вовремя."
+            return {"text": "Ошибка: ноутбук не ответил вовремя."}
         finally:
             self.pending.pop(call_id, None)
 
     async def handle(self, request: web.Request) -> web.WebSocketResponse:
         if not hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + self.token):
             raise web.HTTPUnauthorized()
-        ws = web.WebSocketResponse(heartbeat=20)
+        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=32 * 1024 * 1024)  # screenshots
         await ws.prepare(request)
         if self.online:
             await self.ws.close()
@@ -53,12 +53,12 @@ class Hub:
             data = msg.json()
             fut = self.pending.get(data.get("id"))
             if fut and not fut.done():
-                fut.set_result(str(data.get("result", "")))
+                fut.set_result({"text": str(data.get("text", "")), "image": data.get("image")})
         if self.ws is ws:
             self.ws = None
             for fut in self.pending.values():
                 if not fut.done():
-                    fut.set_result("Ошибка: ноутбук отключился.")
+                    fut.set_result({"text": "Ошибка: ноутбук отключился."})
         log.info("laptop disconnected")
         return ws
 

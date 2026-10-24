@@ -8,11 +8,12 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import threading
 
 import aiohttp
 
-from core import actions, settings  # noqa: F401  settings loads .env
+from core import actions, desktop, settings  # noqa: F401  settings loads .env
 
 ALLOWED = {
     "open_app", "close_app", "type_text", "hotkey", "list_windows", "focus_window",
@@ -47,22 +48,55 @@ class Worker(threading.Thread):
 
     @staticmethod
     def _execute(tool, args):
-        if tool not in ALLOWED:
-            return "Ошибка: инструмент %s запрещён на ноутбуке." % tool
+        """Returns {"text": ...} plus "image" (base64 PNG) when a screenshot was taken."""
+        if tool not in ALLOWED and tool not in ("look", "ui_action"):
+            return {"text": "Ошибка: инструмент %s запрещён на ноутбуке." % tool}
         try:
+            if tool == "look":
+                return look(bool(args.get("screenshot")))
+            if tool == "ui_action":
+                res = desktop.execute(args.get("action"), args.get("params") or {}, args.get("snapshot_id"))
+                return {"text": ("" if res.ok else "Ошибка: ") + res.message}
             result = getattr(actions, tool)(**args)
         except actions.ActionError as e:
-            return "Ошибка: %s" % e
+            return {"text": "Ошибка: %s" % e}
         except Exception as e:
             log.exception("action %s failed", tool)
-            return "Ошибка: %s: %s" % (type(e).__name__, e)
-        return "Готово." if result is None else str(result)
+            return {"text": "Ошибка: %s: %s" % (type(e).__name__, e)}
+        return {"text": "Готово." if result is None else str(result)}
 
     async def submit(self, tool, args):
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         self.jobs.put((tool, args, lambda r: loop.call_soon_threadsafe(fut.set_result, r)))
         return await fut
+
+
+def look(screenshot):
+    """UIA snapshot of the active window as compact text, the cheap way for the brain to see."""
+    snap = desktop.observe(include_screenshot=screenshot)
+    lines = ["snapshot_id: %s" % snap["snapshot_id"], "окно: %s" % snap["window"]["title"]]
+    for el in snap["elements"]:
+        if not (el["name"] or el["value"] or el["editable"]):
+            continue
+        b = el["bounds"]
+        line = "%s %s «%s»" % (el["id"], el["role"], el["name"][:80])
+        if el["value"]:
+            line += " = «%s»" % el["value"][:80]
+        if el["editable"]:
+            line += " [поле ввода]"
+        if not el["enabled"]:
+            line += " [недоступен]"
+        lines.append(line + " @%d,%d" % (b["left"] + b["width"] // 2, b["top"] + b["height"] // 2))
+    if snap["truncated"]:
+        lines.append("(список обрезан, элементов больше)")
+    out = {"text": "\n".join(lines)}
+    if snap.get("screenshot"):
+        shot = snap["screenshot"]
+        out["image"] = shot["base64"]
+        out["text"] += "\nСкриншот %dx%d приложен, click_at принимает координаты на нём." % (
+            shot["width"], shot["height"])
+    return out
 
 
 async def serve(worker):
@@ -76,8 +110,8 @@ async def serve(worker):
                 data = msg.json()
                 log.info("-> %s %s", data.get("tool"), data.get("args"))
                 result = await worker.submit(data.get("tool"), data.get("args") or {})
-                log.info("<- %s", result)
-                await ws.send_json({"id": data.get("id"), "result": result})
+                log.info("<- %s", result["text"][:300])
+                await ws.send_json({"id": data.get("id"), **result})
 
 
 async def open_tunnel():
@@ -94,7 +128,10 @@ async def open_tunnel():
 
 
 async def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # pythonw (autostart) has no console, so log to a file next to the script
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                        filename=None if sys.stderr else os.path.join(os.path.dirname(__file__), "hands.log"),
+                        encoding="utf-8")
     if not TOKEN:
         raise SystemExit("JARVIS_HANDS_TOKEN не задан в .env")
     worker = Worker()

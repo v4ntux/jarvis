@@ -39,4 +39,16 @@ TOOLS = [
     _t("show_desktop", "Показать рабочий стол."),
     _t("clipboard_get", "Прочитать текст из буфера обмена."),
     _t("clipboard_set", "Положить текст в буфер обмена.", {"text": S}, ["text"]),
+    _t("look", "Посмотреть на активное окно: список кнопок, ссылок, полей с id и координатами. "
+       "Дёшево, используй всегда перед ui_action. screenshot=true добавляет картинку окна, "
+       "это дорого: только если по списку элементов не понять, куда нажать.",
+       {"screenshot": {"type": "boolean"}}),
+    _t("ui_action", "Действие с элементом из последнего look. После каждого действия снимок сбрасывается, "
+       "для следующего действия снова вызови look. Действия: click_element {element_id, button?, count?}, "
+       "type_into_element {element_id, text}, scroll {element_id, direction: up|down, amount}, "
+       "press_key {keys}, click_at {x, y} (координаты на скриншоте, только после look со screenshot).",
+       {"action": {"type": "string",
+                   "enum": ["click_element", "type_into_element", "scroll", "press_key", "click_at"]},
+        "params": {"type": "object"}, "snapshot_id": S},
+       ["action", "params", "snapshot_id"]),
 ]
