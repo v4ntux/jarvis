@@ -24,10 +24,10 @@ LOOK = re.compile(r"(?<!\w)(?:смотри|смотрите|посмотри|г�
 MUTE = re.compile(r"(?<!\w)(?:заткнись|помолчи|замолчи|молчи|умолкни|тихо|не пиши|мут|shut up)(?!\w)", re.I)
 UNMUTE = re.compile(r"(?<!\w)(?:говори|можешь писать|можно писать|размуть\w*|врубай\w*|вернись)(?!\w)", re.I)
 
-GAP_ADDRESSED = 5  # seconds between two things Jarvis does in one group when he was called
+GAP_ADDRESSED = 1.5  # seconds between two things Jarvis does in one group when he was called
 GAP_SPONTANEOUS = 60  # ... and when he acts on his own (the gap counts from his last look too)
-SPONT_HOURLY = 4  # his own reactions and comments per group per hour
-SPONT_DAILY = 60  # ... and in all groups per day
+SPONT_HOURLY = 10  # his own reactions and comments per group per hour
+SPONT_DAILY = 150  # ... and in all groups per day
 CONTEXT = 25  # messages of the talk that Gemini gets
 LINE = 300
 MAX_ANSWER = 600

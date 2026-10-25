@@ -350,3 +350,130 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MoreTests(unittest.IsolatedAsyncioTestCase):
+    """What came out of the owner's second complaint: lag, repeats, a dumb «я не вижу фото»."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.memory = Memory(os.path.join(self.tmp.name, "j.db"))
+
+    def tearDown(self):
+        self.memory.db.close()
+        self.tmp.cleanup()
+
+    async def test_a_long_wait_for_one_message_does_not_hold_up_the_others(self):
+        clock = Clock()
+        p = pace.Pace(OWNER, clock=clock)
+        p.cool_until["send"] = clock.now + 200
+        self.assertGreater(p.delay("send", OWNER, False), 199)
+        async with p.lock:
+            p.book("send", OWNER, 200)
+        self.assertFalse(p.lock.locked())  # the owner's message waits outside the lock
+
+    async def test_a_status_line_is_skipped_when_it_would_be_late(self):
+        client = pace.PacedClient(StringSession(), 1, "hash")
+        client.pace = pace.Pace(OWNER)
+        client.pace.cool_until["send"] = client.pace.clock() + 100
+        with self.assertRaises(pace.Throttled), pace.at_most(3):
+            await client(send(USER))
+
+    async def test_a_stranger_can_start_a_new_chat(self):
+        fake = FakeGemini("ок")
+        s = Strangers(make_cfg(), self.memory, fake)
+        await s.reply(7, "Ромбик", "порезы на руках")
+        out = await s.reply(7, "Ромбик", "Жарвис, новый чат")
+        self.assertIn("чистый лист", out.answer)
+        await s.reply(7, "Ромбик", "йоу")
+        texts = [p["text"] for c in fake.seen[-1] for p in c["parts"] if "text" in p]
+        self.assertFalse(any("порезы" in t for t in texts))
+        self.assertEqual(len(self.memory.peer_history(7, 50)), 6)  # the owner still sees everything
+
+    def test_his_own_code_and_restart_ask_first(self):
+        ask = Brain._needs_confirm
+        for command in ("sudo systemctl restart jarvis.service", "cd /opt/jarvis && sed -i 's/a/b/' jarvis/tg_user.py",
+                        "python3 - <<EOF\nopen('/opt/jarvis/jarvis/brain.py','w').write('x')\nEOF",
+                        "cp /tmp/x.py /opt/jarvis/jarvis/tools.py", "pkill -f 'python -m jarvis'"):
+            self.assertTrue(ask("server_shell", {"command": command}), command)
+        for command in ("cat /opt/jarvis/jarvis/tools.py", "sed -n 1,40p /opt/jarvis/jarvis/brain.py",
+                        "systemctl status jarvis", "journalctl -u jarvis -n 50", "grep -n def /opt/jarvis/jarvis/brain.py"):
+            self.assertFalse(ask("server_shell", {"command": command}), command)
+
+    def test_a_photo_from_a_moment_ago_is_seen_again(self):
+        from jarvis import brain as brain_module
+
+        with patch.object(brain_module, "INBOX", self.tmp.name):
+            jpeg = b"\xff\xd8\xff" + b"x" * 30
+            with open(os.path.join(self.tmp.name, "photo_5.jpg"), "wb") as f:
+                f.write(jpeg)
+            messages = [{"role": "user", "content": "[фото] мем\n[фото сохранено в inbox как photo_5.jpg]"},
+                        {"role": "assistant", "content": "Классика"},
+                        {"role": "user", "content": "ага, и ты не пались"}]
+            brain_module._recall_photo(messages)
+        self.assertEqual(messages[0]["content"][0]["type"], "image")
+        self.assertEqual(messages[2]["content"], "ага, и ты не пались")
+
+    def test_markdown_is_made_plain(self):
+        from jarvis import style
+
+        self.assertEqual(style.plain("**Гайд:** факт `#11`\n### Итог\nок"), "Гайд: факт #11\nИтог\nок")
+
+    def test_questions_are_talk_requests_are_work(self):
+        from jarvis import autonomy
+
+        for text in ("Eto kogda nado skinut?", "зачем ты звонил?", "как открыть блокнот?"):
+            self.assertFalse(autonomy.looks_like_task(text), text)
+        for text in ("Скинь гифки", "Можешь скинуть решение?", "открой блокнот"):
+            self.assertTrue(autonomy.looks_like_task(text), text)
+
+    def test_a_burst_of_gifs_is_one_request(self):
+        from jarvis.__main__ import LOOK_AT, together
+
+        gif = [{"inlineData": {"mimeType": "video/mp4", "data": "AAAA"}}]
+        batch = [{"chat": None, "text": "[гифка]", "images": [], "spoken": False, "media": gif} for _ in range(16)]
+        batch.append({"chat": None, "text": "ору", "images": [], "spoken": True, "media": []})
+        text, images, spoken, media = together(batch)
+        self.assertTrue(text.startswith("[гифка] ×16\nору"))
+        self.assertIn("первые", text)
+        self.assertEqual(len(media), LOOK_AT)
+        self.assertTrue(spoken)
+        self.assertEqual(together([{"chat": None, "text": "привет", "images": [], "spoken": False, "media": []}]),
+                         ("привет", [], False, []))
+
+
+class TalkModelTests(unittest.IsolatedAsyncioTestCase):
+    """Plain talk with the owner goes to the model that gets his jokes; work stays on the cheap one."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.memory = Memory(os.path.join(self.tmp.name, "j.db"))
+
+    def tearDown(self):
+        self.memory.db.close()
+        self.tmp.cleanup()
+
+    async def ask(self, text, **changes):
+        from jarvis import brain as brain_module
+
+        b = brain_module.Brain(make_cfg(**changes), self.memory, SimpleNamespace(online=False, routines=[]))
+        b.client = SimpleNamespace(messages=FakeMessages(claude_says("ха, база")))
+
+        async def nothing(*_):
+            return True
+
+        answer = await b.reply(text, brain_module.Session(nothing, nothing, nothing))
+        return b.client.messages.seen[0]["model"], answer
+
+    async def test_talk_on_sonnet_work_on_haiku(self):
+        self.assertEqual((await self.ask("ага, ты тоже не палься"))[0], "claude-sonnet-5-5")
+        self.assertEqual((await self.ask("открой блокнот"))[0], "claude-haiku-5-5")
+
+    async def test_talk_budget_spent_means_the_cheap_one(self):
+        from jarvis.brain import TALK_PREFIX
+
+        self.memory.log_usage(TALK_PREFIX + "claude-sonnet-5-5", 1, 1, 1.5)  # over the talk budget, under the day
+        self.assertEqual((await self.ask("как дела"))[0], "claude-haiku-5-5")
+
+    async def test_no_price_under_a_joke(self):
+        self.assertNotIn("$", (await self.ask("как дела", prices=((100.0, 100.0), (100.0, 100.0))))[1])

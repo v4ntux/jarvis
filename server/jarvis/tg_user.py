@@ -31,7 +31,8 @@ log = logging.getLogger("jarvis.tg")
 SERVICE = 777000  # Telegram's own notices, login codes among them: never answered or passed anywhere
 MAX_FILE = 200 * 1024 * 1024
 MAX_STRANGER_VOICE = 120  # seconds: longer voice messages from strangers are not worth the quota
-MAX_ALBUM_IMAGES = 6  # the model looks at this many pictures of an album; all of them are saved
+MAX_ALBUM_IMAGES = 6
+PLACED_CALL_SECONDS = 20  # a call to someone else for the owner: say it, and hang up by then at the latest  # the model looks at this many pictures of an album; all of them are saved
 SPAM_BLOCK_AFTER = 3  # junk messages from one stranger before Telegram's block
 PHONE = re.compile(r"^\+?\d[\d\s()-]{8,}$")
 
@@ -86,6 +87,7 @@ class UserAccount:
         self.groups = Groups(cfg, strangers.memory, strangers.gemini)  # how he behaves in group chats
         self.taste: Taste | None = None  # his own stickers and GIFs, once the account is up
         self.me_id = 0
+        self.placed: set[int] = set()  # people Jarvis is calling for the owner right now
         self._background: set[asyncio.Task] = set()
 
     async def start(self) -> bool:
@@ -537,6 +539,28 @@ class UserAccount:
         cue = f"Ты сам позвонил пользователю. Скажи ему: {text}"
         return await self.calls.call(self.cfg.owner_id, self.owner_persona(cue))
 
+    async def call_user(self, user, text: str) -> bool:
+        """Rings someone else on the owner's behalf, says text and hangs up; True when they picked up."""
+        if not (self.ready and self.calls):
+            return False
+        peer = getattr(user, "id", user)
+        persona = calls.Persona(
+            "Ты Джарвис, ИИ-ассистент Вана. Ты сам позвонил человеку, чтобы передать короткое сообщение от Вана. "
+            "Говори по-русски, коротко, одной-двумя фразами. Когда сказал — вызови hang_up.",
+            f"Ты сам позвонил человеку. Скажи ему: {text}. Потом вызови hang_up.",
+            [{"name": "hang_up", "description": "Положить трубку: когда сообщение передано."}])
+        self.placed.add(peer)  # the task reports how it went: no separate «мне звонил» note
+        picked = await self.calls.call(peer, persona)
+        if picked:
+            for _ in range(PLACED_CALL_SECONDS * 2):  # done when he hangs up himself; a talk that runs on is cut
+                if peer not in self.calls.talks:
+                    break
+                await asyncio.sleep(0.5)
+            await self.calls.hang_up(peer)
+        else:
+            self.placed.discard(peer)
+        return picked
+
     def _choose(self, peer: int) -> calls.Persona | None:
         if peer == self.cfg.owner_id:
             if not self.owner_persona:
@@ -567,12 +591,16 @@ class UserAccount:
                 await self.owner.say(f"📞 Звонок, {minutes} мин:\n{lines}"[:4000], quiet=True)
             return
         name = await self.name_of(peer)
-        # A call counts against the same caps as messages, and shows up in tg_chats
+        placed = peer in self.placed
+        self.placed.discard(peer)
         said = " / ".join(t for who, t in talk.transcript if who == "them")
+        # A call counts against the same caps as messages, and shows up in tg_chats
         self.strangers.memory.add_peer(peer, name, "user", f"[звонок] {said}"[:4000])
         self.strangers.memory.add_peer(peer, name, "model", "[звонок] " + " / ".join(
             t for who, t in talk.transcript if who == "jarvis")[:4000])
         notes = self.call_notes.pop(peer, [])
+        if placed and not notes:
+            return  # the owner asked for this call: the task's own answer says how it went
         text = f"📞 Мне звонил {name}, {minutes} мин."
         if lines:
             text += f"\n{lines[:1500]}"

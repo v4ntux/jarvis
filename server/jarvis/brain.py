@@ -43,7 +43,8 @@ CAPABILITIES = """Твои возможности:
   сразу, попытки взлома — сводка раз в день, fail2ban их банит) и его лондонский VPS.
 - Свой Telegram-аккаунт (ты сам, не бот): tg_call — позвонить Вану голосом сейчас (бесплатно), tg_send — написать
   человеку или отправить ему фото и файлы от своего имени, tg_chats — кто тебе писал, tg_profile — свой профиль.
-  Чужим людям, которые пишут или звонят тебе, отвечает помощник на Gemini."""
+  Чужим людям, которые пишут или звонят тебе, отвечает отдельный помощник (Claude/Gemini) без доступа к твоим
+  делам. tg_call с to — позвонить другому человеку (только по просьбе Вана), сказать text и положить трубку."""
 
 HOW = """Как работать:
 - Всё, где не нужен экран ноутбука или его файлы, делай на сервере, даже если ноутбук включён: интернет, скачивание,
@@ -84,11 +85,16 @@ MAX_STEPS = 60
 MAX_TOKENS = 16000
 # How hard the model thinks before each step: work (commands, tasks) gets the deep look the owner asked for
 EFFORT_TASK, EFFORT_CHAT = "high", "medium"
+TALK_PREFIX = "talk:"  # usage rows of plain talk with the owner, counted against its own daily budget
 # Everything runs on the cheap model; the smart one only when asked or when the cheap one keeps failing
 ESCALATE_ON_ERRORS = 3
 SMART_WORDS = re.compile(r"подумай|хорошенько|умн(ее|ую)|sonnet|podumay|horoshenko", re.I)
 # Only the newest screenshots stay in context; older ones are the main cost driver
 KEEP_IMAGES = 1
+# A photo the owner sent a moment ago stays in view for his next few messages: without it the model saw only
+# «[фото]» in the history and decided it had never seen the picture
+PHOTO_NOTE = re.compile(r"\[фото сохранено в inbox как (photo_\d+\.jpg)\]")
+RECALL_WITHIN = 6
 MAX_RESULT_CHARS = 5000
 # Cache the whole tool catalog: the breakpoint goes on the last tool
 CACHED_TOOLS = TOOLS[:-1] + [{**TOOLS[-1], "cache_control": {"type": "ephemeral"}}]
@@ -114,6 +120,11 @@ DANGEROUS = re.compile(
     # accounts and passwords, antivirus, registry deletes
     r"\bpasswd\b|\bchpasswd\b|\buserdel\b|net\s+user\s+\S+\s+/(add|delete)|set-mppreference|reg\s+delete|"
     r"remove-itemproperty|"
+    # his own code, service and session: an edit or a restart can leave Jarvis dead with nobody to bring him back
+    r"^(?=[\s\S]*?(sed\s+-i|\bcp\b|\bmv\b|\btee\b|>|\bpatch\b|\bgit\s+(checkout|apply|pull|reset|stash)|\bchmod\b|"
+    r"\bchown\b|\brm\b|write_text|open\())(?=[\s\S]*?(/opt/jarvis/jarvis\b|(^|[\s/;&])jarvis/\w+\.py\b|"
+    r"/etc/systemd/system/jarvis|tg_user\.session|\.env\b))|"
+    r"systemctl\s+(restart|stop|kill|disable|mask|daemon-reload)\b[^|;&]*\bjarvis|\bp?kill\b[^|;&]*(jarvis|python)|"
     # lost work in git
     r"git\s+(push\s[^|;]*(--force|-f\b)|reset\s+--hard|clean\s+-\w*f)|"
     # running a script straight from the internet: a web page could have put it there
@@ -163,6 +174,21 @@ def _prune_images(messages: list[dict]) -> None:
                     seen += 1
                     if seen > KEEP_IMAGES:
                         content[i] = {"type": "text", "text": "(старая картинка убрана)"}
+
+
+def _recall_photo(messages: list[dict]) -> None:
+    """Puts the newest recent photo back into its message (the newest message carries its own pictures)."""
+    for msg in reversed(messages[-RECALL_WITHIN:-1]):
+        if msg["role"] != "user" or not isinstance(msg["content"], str):
+            continue
+        found = PHOTO_NOTE.search(msg["content"])
+        path = os.path.join(INBOX, found.group(1)) if found else ""
+        if path and os.path.isfile(path):
+            with open(path, "rb") as f:
+                data = base64.b64encode(f.read()).decode()
+            msg["content"] = [{"type": "image", "source": {"type": "base64", "media_type": _media_type(data), "data": data}},
+                              {"type": "text", "text": msg["content"]}]
+            return
 
 
 def _mark_cache(messages: list[dict]) -> None:
@@ -259,6 +285,8 @@ class Brain:
                 *({"type": "image", "source": {"type": "base64", "media_type": _media_type(b), "data": b}}
                   for b in images),
                 {"type": "text", "text": text}]}
+        else:
+            _recall_photo(messages)
         if hint:
             last = messages[-1]
             last["content"] = (last["content"] + "\n" + hint if isinstance(last["content"], str)
@@ -270,6 +298,8 @@ class Brain:
         task = task or autonomy.looks_like_task(text)
         thinking = {"output_config": {"effort": EFFORT_TASK if task else EFFORT_CHAT}}
         force_plan = autonomy.is_complex(text)
+        # Plain talk with Ван goes to the model that gets his jokes, for the whole turn; work stays on the cheap one
+        talk = not task and not smart and self._talk_allowed()
         nudges = streak = dithered = 0  # pushes to keep going, failed tool calls in a row, pushes against dithering
         declined = False  # the owner said no to something: nothing is pushed against that
         try:
@@ -284,7 +314,7 @@ class Brain:
                     break
                 # The cheap model plans and works; the smart one takes over when it keeps failing or dithering
                 smart = smart or errors >= ESCALATE_ON_ERRORS or streak >= 2 or plan.escalate or dithered > 0
-                model = self.cfg.smart_model if smart else self.cfg.model
+                model = self.cfg.smart_model if smart else self.cfg.talk_model if talk else self.cfg.model
                 extra = {}
                 if not plan.started and (force_plan or (task and len(log) >= 4)):
                     force_plan = False  # a big task gets written down first
@@ -304,7 +334,7 @@ class Brain:
                     resp = await self.client.messages.create(  # a model that refuses to be forced: just ask nicely
                         model=model, max_tokens=MAX_TOKENS, system=system, tools=CACHED_TOOLS, messages=messages,
                         **thinking)
-                spent += self._log_usage(model, resp.usage)
+                spent += self._log_usage(model, resp.usage, TALK_PREFIX if talk else "")
                 answer = "".join(b.text for b in resp.content if b.type == "text").strip()
                 if resp.stop_reason != "tool_use":
                     push = ""
@@ -351,7 +381,7 @@ class Brain:
         # The action log lets «продолжай» pick up where the last attempt stopped
         stored = answer + (f"\n[действия: {', '.join(log)}]" if log else "")
         self.memory.add("assistant", stored)
-        if spent >= 0.01:
+        if spent >= 0.01 and not talk:  # a price under a joke is noise; /cost has the day's total
             answer += f"\n\n(${spent:.2f})"
         return answer
 
@@ -423,6 +453,15 @@ class Brain:
         if name == "tg_call":
             if not self.tg.calls:
                 return "Ошибка: звонки в Telegram не работают. Используй phone_call."
+            if args.get("to"):
+                user = await self.tg.find_user(args["to"])
+                if isinstance(user, str):
+                    return user
+                if not names.mentioned(args["to"], self._owner_words(session)) and not await session.confirm(
+                        f"Позвонить {self.tg.display(user)} и сказать: «{args['text']}»? Этого человека ты не называл."):
+                    return "Ошибка: пользователь отклонил звонок."
+                answered = await self.tg.call_user(user, args["text"])
+                return "Дозвонился, сказал и положил трубку." if answered else "Не взял трубку."
             answered = await self.tg.call_owner(args["text"])
             return "Дозвонился и сказал, разговор идёт в звонке." if answered else "Не взял трубку."
         if name == "tg_profile":
@@ -443,13 +482,15 @@ class Brain:
             photos = all(os.path.splitext(n)[1].lower() in IMAGE_EXT for n, _ in files)
             what = ("фото " if photos else "файл ") + ", ".join(n for n, _ in files)
         # Someone Ван named himself needs no question; a recipient he never mentioned could be a page talking
-        said = getattr(session, "request", "") + "\n" + "\n".join(
-            m["content"] for m in self.memory.recent(12) if m["role"] == "user" and isinstance(m["content"], str))
-        if not names.mentioned(args["to"], said) and not await session.confirm(
+        if not names.mentioned(args["to"], self._owner_words(session)) and not await session.confirm(
                 f"Отправить от моего аккаунта {self.tg.display(user)}: {what}? Это имя ты не называл."
                 + (f"\n\n{text}" if text else "")):
             return "Ошибка: пользователь отклонил отправку."
         return await self.tg.send_to(user, text, files)
+
+    def _owner_words(self, session: Session) -> str:
+        return getattr(session, "request", "") + "\n" + "\n".join(
+            m["content"] for m in self.memory.recent(12) if m["role"] == "user" and isinstance(m["content"], str))
 
     async def _attachments(self, file: str, source: str) -> list[tuple[str, bytes]] | str:
         """The files to send to someone, or what went wrong. Several names go comma-separated."""
@@ -568,11 +609,14 @@ class Brain:
     def spent_today(self) -> float:
         return self.memory.spent_since(day_start())
 
-    def _log_usage(self, model: str, u) -> float:
+    def _talk_allowed(self) -> bool:
+        return bool(self.cfg.talk_model) and self.memory.spent_since(day_start(), TALK_PREFIX) < self.cfg.talk_daily
+
+    def _log_usage(self, model: str, u, prefix: str = "") -> float:
         # Cache writes cost 1.25x, cache reads 0.1x of normal input
         tokens_in = (u.input_tokens + (u.cache_creation_input_tokens or 0) * 1.25
                      + (u.cache_read_input_tokens or 0) * 0.1)
-        price_in, price_out = self.cfg.prices[model == self.cfg.smart_model]
+        price_in, price_out = self.cfg.prices[model in (self.cfg.smart_model, self.cfg.talk_model)]
         cost = (tokens_in * price_in + u.output_tokens * price_out) / 1e6
-        self.memory.log_usage(model, int(tokens_in), u.output_tokens, cost)
+        self.memory.log_usage(prefix + model, int(tokens_in), u.output_tokens, cost)
         return cost

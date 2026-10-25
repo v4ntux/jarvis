@@ -52,6 +52,9 @@ class Config:
     stranger_hourly: int
     stranger_daily: int
     call_minutes: int
+    # Talk with the owner (not work): the model, and dollars a day before it falls back to the cheap one
+    talk_model: str
+    talk_daily: float
     # Strangers and groups talk to Claude Haiku first (Gemini when it cannot): model, dollars a day, prices
     chat_model: str
     chat_daily: float
@@ -109,13 +112,16 @@ def load() -> Config:
         stranger_hourly=int(os.environ.get("STRANGER_HOURLY", "20")),
         stranger_daily=int(os.environ.get("STRANGER_DAILY", "300")),
         call_minutes=int(os.environ.get("CALL_MINUTES", "10")),
+        # Sonnet gets his jokes and subtext where Haiku missed them (measured on his own meme): ~$0.005 a message
+        talk_model=os.environ.get("TALK_MODEL", "claude-sonnet-5-5"),
+        talk_daily=float(os.environ.get("TALK_DAILY", "1.0")),
         chat_model=os.environ.get("CHAT_MODEL", "claude-haiku-5-5"),
         chat_daily=float(os.environ.get("CHAT_DAILY", "0.5")),
         chat_prices=(float(os.environ.get("CHAT_PRICE_IN", "0.1")), float(os.environ.get("CHAT_PRICE_OUT", "0.5"))),
         monitor_sites=os.environ.get("MONITOR_SITES", "https://nvate.uz"),
         monitor_hosts=os.environ.get("MONITOR_HOSTS", "London=root@46.226.162.170"),
-        group_hourly=int(os.environ.get("GROUP_HOURLY", "20")),
-        group_daily=int(os.environ.get("GROUP_DAILY", "150")),
+        group_hourly=int(os.environ.get("GROUP_HOURLY", "60")),
+        group_daily=int(os.environ.get("GROUP_DAILY", "600")),
         group_react_chance=float(os.environ.get("GROUP_REACT_CHANCE", "0.35")),
         group_text_chance=float(os.environ.get("GROUP_TEXT_CHANCE", "0.05")),
         extra_chance=float(os.environ.get("EXTRA_CHANCE", "0.15")),

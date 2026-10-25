@@ -25,6 +25,10 @@ RETRY_STATUS = {429, 500, 502, 503, 504}
 HISTORY = 30
 MAX_IN = 4000
 PASS_ON = re.compile(r"^[ \t]*ПЕРЕДАТЬ:[ \t]*(.+)$", re.M)
+# A stranger asks to start over: the model forgets the talk so far (it kept circling back to it)
+NEW_CHAT = re.compile(r"^\W*(?:(?:д?жарвис|jarvis)\W*)?(?:новый чат|начн[её]м (?:с начала|заново)|давай заново|"
+                      r"забудь (?:всё|все|это|прошлое)|/reset|/new|/start|reset|novyy chat|noviy chat)\W*$", re.I)
+FRESH = "Окей, чистый лист 🫡 О чём болтаем?"
 SPAM = "СПАМ"
 TRANSCRIBE = "Запиши дословно, что сказано. Только сам текст, без пояснений и кавычек. Если речи нет, ответь пустой строкой."
 # Banter with swearing counts as harassment for Gemini's default filter; only that filter is loosened
@@ -205,8 +209,13 @@ class Strangers:
         """What to answer; None when Gemini is off or this person hit a cap. Media is looked at, not stored."""
         if not self.ready or not self.allowed(peer):
             return None
+        if NEW_CHAT.match(text.strip()):
+            self.memory.add_peer(peer, name, "user", text[:MAX_IN])
+            self.memory.add_peer(peer, name, "model", FRESH)
+            self.memory.peer_fresh_start(peer)
+            return Reply(FRESH)
         self.memory.add_peer(peer, name, "user", text[:MAX_IN])
-        contents = to_contents(self.memory.peer_history(peer, HISTORY))
+        contents = to_contents(self.memory.peer_history(peer, HISTORY, fresh=True))
         urge = style.impulse(self.rng, self.cfg.extra_chance)
         if urge:
             contents[-1]["parts"].append({"text": urge})  # not stored: it is only a nudge for this answer

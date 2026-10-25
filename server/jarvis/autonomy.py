@@ -59,8 +59,17 @@ MAX_STEPS_IN_PLAN = 12
 MAX_ATTEMPTS = 3
 
 
+# «а это когда надо скинуть?», «зачем ты звонил?»: a question about a thing to do is talk, not a job
+QUESTION = re.compile(r"^\W*(?:а\s+|a\s+)?(?:это\s+|eto\s+)?(?:когда|зачем|почему|что|чё|че|как|где|кто|сколько|какой|"
+                      r"какая|какие|kogda|zachem|pochemu|shto|chto|cho|kak|gde|kto|skolko|kakoy|kakaya|kakiye)(?!\w)",
+                      re.I)
+
+
 def looks_like_task(text: str) -> bool:
-    return bool(TASK.search(text or ""))
+    text = (text or "").strip()
+    if QUESTION.search(text) and text.endswith("?") and len(text) < 120:
+        return False
+    return bool(TASK.search(text))
 
 
 def is_complex(text: str) -> bool:

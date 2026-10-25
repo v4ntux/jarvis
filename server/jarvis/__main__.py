@@ -12,8 +12,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from . import calls, config, groups, intents, monitor, phone, style, tg_user, voice, watchers, web
-from .brain import INBOX, Brain, Session
+from . import calls, config, groups, intents, monitor, pace, phone, style, tg_user, voice, watchers, web
+from .brain import INBOX, TALK_PREFIX, Brain, Session
 from .chat import USAGE_PREFIX, Chat
 from .front import Front
 from .gemini import Gemini, Strangers
@@ -28,6 +28,11 @@ BUSY = "Я ещё занят прошлой задачей. /stop — прерв
 CALL_MARK = "[голосом в звонке] "
 CALL_WORK_SECONDS = 90
 PROGRESS_EVERY = 6  # seconds between edits of the «Работаю…» message
+PROGRESS_PATIENCE = 3  # a «Работаю…» line that cannot go out this soon is skipped: the task never waits on it
+# The owner's messages that come in a burst (a pack of GIFs, a thought split over several messages) are one request
+BURST_QUIET, BURST_MAX = 0.7, 4.0
+LOOK_AT = 3  # pictures and videos of one burst that the model actually looks at
+BUSY_NOTICE_AFTER = 8  # seconds into a request before a new message gets «доделываю прошлое» (once)
 HELP = ("Джарвис на связи. Пиши текстом или голосом, присылай фото и файлы, звони в Telegram.\n"
         "Работаю на сервере 24/7, ноутбук нужен только для дел на нём. Команды не нужны: просто говори, "
         "например «позвони через 5 минут» или «стоп».\n"
@@ -35,6 +40,23 @@ HELP = ("Джарвис на связи. Пиши текстом или голо
         "/groups мои группы (/group 2 тихо — как себя вести там) · "
         "/watchers наблюдатели (/unwatch 3 — удалить) · /calltest позвонить в Telegram · /phonetest проверить SMS "
         "(/phonetest call — звонок робота) · /voice голосовые ответы вкл/выкл · /reset забыть разговор")
+
+
+def together(batch: list[dict]) -> tuple[str, list[str], bool, list[dict]]:
+    """One request from several messages: their words in order (a run of the same «[гифка]» counted, not
+    repeated), the pictures, and what the model looks at of the videos and GIFs (the first few)."""
+    lines: list[list] = []
+    for item in batch:
+        if lines and lines[-1][0] == item["text"] and item["text"].startswith("["):
+            lines[-1][1] += 1
+        else:
+            lines.append([item["text"], 1])
+    text = "\n".join(t if n == 1 else f"{t} ×{n}" for t, n in lines if t)
+    looked = [item["media"] for item in batch if item["media"]]
+    if len(looked) > LOOK_AT:
+        text += f"\n(из {len(looked)} вложений ты видишь первые {LOOK_AT}; ответь на всю пачку разом, коротко)"
+    images = [b for item in batch for b in item["images"]][:6]
+    return text, images, any(item["spoken"] for item in batch), [p for parts in looked[:LOOK_AT] for p in parts]
 
 
 async def main() -> None:
@@ -84,12 +106,13 @@ async def main() -> None:
             status["shown"] = time.time()
             text = "⚙️ Работаю…\n" + "\n".join(status["lines"])
             try:
-                if status["msg"] is None:
-                    status["msg"] = await chat.say(text, quiet=True)
-                else:
-                    await chat.edit(status["msg"], text)
+                with pace.at_most(PROGRESS_PATIENCE):  # a status line is not worth waiting for: skipped when late
+                    if status["msg"] is None:
+                        status["msg"] = await chat.say(text, quiet=True)
+                    else:
+                        await chat.edit(status["msg"], text)
             except Exception:
-                log.debug("progress message failed", exc_info=True)
+                log.debug("progress message skipped", exc_info=True)
 
         session = Session(progress, chat.confirm, chat.send_file)
         session.status = status
@@ -115,6 +138,7 @@ async def main() -> None:
         session = make_session(chat)
         request = brain.reply(text, session, images) if direct else front.reply(text, session, images, media)
         state["task"] = asyncio.create_task(request)
+        state["started"] = time.time()
         await chat.typing()
         try:
             answer = await state["task"]
@@ -188,10 +212,11 @@ async def main() -> None:
         marks = style.split_marks(answer)
         if marks.reaction and not marks.extras:
             await chat.react(marks.reaction)  # like a person's like under his message
-        if marks.text:
-            await send_long(chat, marks.text)
+        text = style.plain(marks.text)  # Telegram shows **bold** and ### as they are
+        if text:
+            await send_long(chat, text)
             if spoken and state["voice_replies"]:
-                await send_voice(chat, marks.text)
+                await send_voice(chat, text)
         await chat.express(marks)  # a sticker or GIF of his own, now and then
 
     async def ask_from_laptop(text: str) -> str:
@@ -322,10 +347,12 @@ async def main() -> None:
     async def cmd_cost(_: str) -> str:
         used, rub = memory.phone_since(config.day_start())
         chat_spent = memory.spent_since(config.day_start(), USAGE_PREFIX)
+        talk_spent = memory.spent_since(config.day_start(), TALK_PREFIX)
         return (f"Claude сегодня: ${brain.spent_today():.4f} из ${cfg.daily_limit:.2f} (обнуляется в твою полночь), "
                 f"из них чужие и группы ${chat_spent:.4f} (их потолок ${cfg.chat_daily:.2f}, дальше отвечает Gemini)\n"
-                "Наш с тобой чат и задачи — Claude Haiku (≈$0.0005 за сообщение), «подумай» — Sonnet. Звонки, видео "
-                "и гифки смотрит Gemini: бесплатно.\n"
+                f"Болтовня с тобой — {cfg.talk_model} (≈$0.005 за сообщение): сегодня ${talk_spent:.4f} из "
+                f"${cfg.talk_daily:.2f}, дальше дешёвая модель. Задачи — Haiku, при трудностях и по «подумай» — Sonnet. "
+                "Звонки, видео и гифки смотрит Gemini: бесплатно.\n"
                 f"Всего: ${memory.spent_since(0):.4f}\n"
                 f"SMS и звонки сегодня: {used} из {cfg.phone_daily_limit}, {rub:.2f} ₽\n"
                 f"Ответов чужим через Gemini сегодня: {memory.peer_replies_since(config.day_start())} "
@@ -407,15 +434,48 @@ async def main() -> None:
         words = text[1:].split(maxsplit=1) if text.startswith("/") else []
         return commands.get(words[0].split("@")[0].lower()) if words else None
 
+    waiting: list[dict] = []  # the owner's messages that have not been answered yet
+    feeder: dict = {"task": None, "told": False}
+
     async def handle_owner(chat, text: str, images: list[str] | None = None, spoken: bool = False,
                            path: str | None = None, media: list[dict] | None = None) -> None:
-        """An owner message from Jarvis's own account: a command, a file, a meme or a request."""
+        """An owner message from Jarvis's own account: a command, a file, a meme or a request.
+
+        Commands and «стоп»/«позвони» act at once, even in the middle of a task. Everything else waits its turn,
+        and what piles up meanwhile is answered together: no «я занят» for every message, nothing dropped.
+        """
         if path:
             text, images = file_request(path, text)
         elif command := command_of(text):
             await send_long(chat, await command(text))
             return
-        await respond(chat, text, images, spoken, media)
+        if not images and not media and await run_intent(chat, text):
+            return
+        waiting.append({"chat": chat, "text": text, "images": images or [], "spoken": spoken, "media": media or []})
+        if busy() and not media and not feeder["told"] and time.time() - state.get("started", 0) > BUSY_NOTICE_AFTER:
+            feeder["told"] = True  # one word per task, not one per message
+            await chat.say("Секунду, доделываю прошлое, потом отвечу и на это. «стоп» — бросить прошлое.", quiet=True)
+        if feeder["task"] is None or feeder["task"].done():
+            feeder["task"] = asyncio.create_task(feed())
+            background.add(feeder["task"])
+            feeder["task"].add_done_callback(background.discard)
+
+    async def feed() -> None:
+        while waiting:
+            started, seen = time.time(), -1
+            while len(waiting) != seen and time.time() - started < BURST_MAX:  # until the burst stops coming
+                seen = len(waiting)
+                await asyncio.sleep(BURST_QUIET)
+            while busy():  # a call, the laptop or a watcher task has the brain
+                await asyncio.sleep(0.5)
+            batch = waiting[:]
+            del waiting[:]
+            feeder["told"] = False
+            try:
+                await respond(batch[-1]["chat"], *together(batch))
+            except Exception:
+                log.exception("owner request failed")
+
 
     @dp.callback_query(F.data.regexp(r"^(ok|no):"))
     async def on_confirm(q: CallbackQuery) -> None:

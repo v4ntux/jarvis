@@ -181,10 +181,17 @@ class Memory:
                         (time.time(), peer, name, role, content))
         self.db.commit()
 
-    def peer_history(self, peer: int, limit: int) -> list[tuple[str, str]]:
-        rows = self.db.execute("SELECT role, content FROM peers WHERE peer = ? ORDER BY id DESC LIMIT ?",
-                               (peer, limit)).fetchall()
+    def peer_history(self, peer: int, limit: int, fresh: bool = False) -> list[tuple[str, str]]:
+        """The talk with one person, oldest first; fresh: only what came after he asked for a new chat."""
+        since = int(self.meta_get(f"peer_fresh:{peer}", "0") or 0) if fresh else 0
+        rows = self.db.execute("SELECT role, content FROM peers WHERE peer = ? AND id > ? ORDER BY id DESC LIMIT ?",
+                               (peer, since, limit)).fetchall()
         return rows[::-1]
+
+    def peer_fresh_start(self, peer: int) -> None:
+        """«новый чат»: the model stops seeing what was said before (the owner still sees all of it)."""
+        row = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM peers WHERE peer = ?", (peer,)).fetchone()
+        self.meta_set(f"peer_fresh:{peer}", str(row[0]))
 
     def peer_replies_since(self, ts: float, peer: int | None = None) -> int:
         if peer is None:
