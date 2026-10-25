@@ -36,6 +36,18 @@ class Config:
     smsc_api_key: str
     smsc_voice: str
     phone_daily_limit: int
+    # Jarvis's own Telegram account (Telethon); empty api_id means the account is off
+    tg_api_id: int
+    tg_api_hash: str
+    tg_session: str
+    # Everyone except the owner talks to Gemini; empty key means strangers get no reply
+    gemini_key: str
+    gemini_model: str
+    owner_name: str
+    # Strangers: replies per person per hour, replies in total per day, minutes per call
+    stranger_hourly: int
+    stranger_daily: int
+    call_minutes: int
 
 
 def load() -> Config:
@@ -63,4 +75,13 @@ def load() -> Config:
         smsc_api_key=os.environ.get("SMSC_API_KEY", ""),
         smsc_voice=os.environ.get("SMSC_VOICE", "m"),
         phone_daily_limit=int(os.environ.get("PHONE_DAILY_LIMIT", "10")),
+        tg_api_id=int(os.environ.get("TG_API_ID") or 0),
+        tg_api_hash=os.environ.get("TG_API_HASH", ""),
+        tg_session=os.environ.get("TG_SESSION", "/opt/jarvis/data/tg_user"),
+        gemini_key=os.environ.get("GEMINI_API_KEY", ""),
+        gemini_model=os.environ.get("GEMINI_MODEL", "gemini-flash-latest"),
+        owner_name=os.environ.get("OWNER_NAME", ""),
+        stranger_hourly=int(os.environ.get("STRANGER_HOURLY", "20")),
+        stranger_daily=int(os.environ.get("STRANGER_DAILY", "300")),
+        call_minutes=int(os.environ.get("CALL_MINUTES", "20")),
     )

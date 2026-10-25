@@ -23,6 +23,9 @@ class Memory:
                 id INTEGER PRIMARY KEY, ts REAL, spec TEXT, state TEXT, due REAL);
             CREATE TABLE IF NOT EXISTS phone (
                 id INTEGER PRIMARY KEY, ts REAL, kind TEXT, cost REAL);
+            CREATE TABLE IF NOT EXISTS peers (
+                id INTEGER PRIMARY KEY, ts REAL, peer INTEGER, name TEXT, role TEXT, content TEXT);
+            CREATE INDEX IF NOT EXISTS peers_by_peer ON peers (peer, id);
             """
         )
 
@@ -121,3 +124,28 @@ class Memory:
     def phone_since(self, ts: float) -> tuple[int, float]:
         return self.db.execute(
             "SELECT COUNT(*), COALESCE(SUM(cost), 0) FROM phone WHERE ts >= ?", (ts,)).fetchone()
+
+    # Conversations of Jarvis's own Telegram account with people other than the owner
+    def add_peer(self, peer: int, name: str, role: str, content: str) -> None:
+        self.db.execute("INSERT INTO peers (ts, peer, name, role, content) VALUES (?, ?, ?, ?, ?)",
+                        (time.time(), peer, name, role, content))
+        self.db.commit()
+
+    def peer_history(self, peer: int, limit: int) -> list[tuple[str, str]]:
+        rows = self.db.execute("SELECT role, content FROM peers WHERE peer = ? ORDER BY id DESC LIMIT ?",
+                               (peer, limit)).fetchall()
+        return rows[::-1]
+
+    def peer_replies_since(self, ts: float, peer: int | None = None) -> int:
+        if peer is None:
+            row = self.db.execute("SELECT COUNT(*) FROM peers WHERE role = 'model' AND ts >= ?", (ts,)).fetchone()
+        else:
+            row = self.db.execute("SELECT COUNT(*) FROM peers WHERE role = 'model' AND ts >= ? AND peer = ?",
+                                  (ts, peer)).fetchone()
+        return row[0]
+
+    def peer_chats(self, limit: int) -> list[tuple[int, str, float, int]]:
+        """Most recent conversations first: (peer, name, last time, message count)."""
+        return self.db.execute(
+            "SELECT peer, MAX(name), MAX(ts), COUNT(*) FROM peers GROUP BY peer ORDER BY MAX(ts) DESC LIMIT ?",
+            (limit,)).fetchall()
