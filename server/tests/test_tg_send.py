@@ -193,7 +193,7 @@ class AccountSendTests(unittest.IsolatedAsyncioTestCase):
         self.memory = Memory(os.path.join(self.tmp.name, "j.db"))
         with patch.dict(os.environ, ENV, clear=True):
             cfg = config.load()
-        self.account = tg_user.UserAccount(cfg, SimpleNamespace(memory=self.memory), None, self.tmp.name)
+        self.account = tg_user.UserAccount(cfg, SimpleNamespace(memory=self.memory, gemini=None), None, self.tmp.name)
         self.account.client = self.client = FakeClient()
 
     async def asyncTearDown(self):

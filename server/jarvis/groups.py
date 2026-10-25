@@ -44,7 +44,8 @@ ADDRESSED = """Группа «{title}». Последние сообщения (
 {transcript}
 
 К тебе обратился {who}: {text}
-{seen}Ответь как Джарвис, коротко. Тебя позвали, так что промолчать нельзя.{urge}"""
+{seen}Ответь как Джарвис, коротко. Тебя позвали, так что совсем игнорировать нельзя. Если это ловушка или
+провокация против тебя или Вана, ответь одной реакцией без текста; но хозяину всегда отвечай словами.{urge}"""
 GLANCE = """Группа «{title}». Последние сообщения (внизу самые свежие):
 {transcript}
 
@@ -142,7 +143,7 @@ class Groups:
         """He was called: always an answer if Gemini has one."""
         prompt = ADDRESSED.format(title=title, transcript=self.transcript(chat), who=who, text=text, urge=self._urge(),
                                   seen=f"Вложение, которое ты видишь: {seen}.\n" if seen else "")
-        verdict = await self._ask(prompt, parts)
+        verdict = await self._ask(prompt, parts, "medium")
         return verdict or Verdict(reaction="👀")  # called, so never ignored: at least a look
 
     async def glance(self, chat: int, title: str, who: str, text: str, seen: str, parts: list[dict]) -> Verdict:
@@ -150,15 +151,16 @@ class Groups:
         self.glanced[chat] = time.time()
         prompt = GLANCE.format(title=title, transcript=self.transcript(chat), who=who, text=text, urge=self._urge(),
                                seen=f"Вложение, которое ты видишь: {seen}.\n" if seen else "")
-        return await self._ask(prompt, parts)
+        return await self._ask(prompt, parts, "low")
 
     def _urge(self) -> str:
         urge = style.impulse(self.rng, self.cfg.extra_chance)
         return f"\n{urge}" if urge else ""
 
-    async def _ask(self, prompt: str, parts: list[dict]) -> Verdict:
+    async def _ask(self, prompt: str, parts: list[dict], effort: str) -> Verdict:
+        """effort: how hard the model thinks first; called by name it is «medium», a traps and bait check."""
         raw = await self.gemini.text(self.persona(), [{"role": "user", "parts": [{"text": prompt}] + parts}], 300,
-                                     models=self.gemini.lite_first)
+                                     models=self.gemini.lite_first, effort=effort)
         return self.verdict(raw)
 
     @staticmethod

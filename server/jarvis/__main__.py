@@ -12,8 +12,9 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from . import calls, config, groups, intents, phone, style, tg_user, voice, watchers, web
+from . import calls, config, groups, intents, monitor, phone, style, tg_user, voice, watchers, web
 from .brain import INBOX, Brain, Session
+from .chat import USAGE_PREFIX, Chat
 from .front import Front
 from .gemini import Gemini, Strangers
 from .hub import Hub
@@ -26,10 +27,11 @@ BILLING = "https://console.anthropic.com/settings/billing"
 BUSY = "Я ещё занят прошлой задачей. /stop — прервать её."
 CALL_MARK = "[голосом в звонке] "
 CALL_WORK_SECONDS = 90
+PROGRESS_EVERY = 6  # seconds between edits of the «Работаю…» message
 HELP = ("Джарвис на связи. Пиши текстом или голосом, присылай фото и файлы, звони в Telegram.\n"
         "Работаю на сервере 24/7, ноутбук нужен только для дел на нём. Команды не нужны: просто говори, "
         "например «позвони через 5 минут» или «стоп».\n"
-        "/stop прервать · /status ноутбук и Telegram · /cost расход · /memory что помню · "
+        "/stop прервать · /status ноутбук и Telegram · /monitor сайты и серверы · /cost расход · /memory что помню · "
         "/groups мои группы (/group 2 тихо — как себя вести там) · "
         "/watchers наблюдатели (/unwatch 3 — удалить) · /calltest позвонить в Telegram · /phonetest проверить SMS "
         "(/phonetest call — звонок робота) · /voice голосовые ответы вкл/выкл · /reset забыть разговор")
@@ -47,7 +49,8 @@ async def main() -> None:
     brain = Brain(cfg, memory, hub)
     gemini = Gemini(cfg)
     front = Front(brain, gemini)
-    account = tg_user.UserAccount(cfg, Strangers(cfg, memory, gemini), gemini, INBOX)
+    # Strangers and groups: Claude Haiku thinks first and has no daily quota; Gemini when it cannot
+    account = tg_user.UserAccount(cfg, Strangers(cfg, memory, Chat(cfg, memory, gemini)), gemini, INBOX)
     background: set[asyncio.Task] = set()  # keeps fire-and-forget tasks from being garbage collected
     # The bot is optional now: with no token everything goes through Jarvis's own account
     bot = Bot(cfg.bot_token) if cfg.bot_token else None
@@ -70,10 +73,15 @@ async def main() -> None:
         task.add_done_callback(background.discard)
 
     def make_session(chat) -> Session:
-        status: dict = {"msg": None, "lines": []}
+        status: dict = {"msg": None, "lines": [], "shown": 0.0}
 
         async def progress(line: str) -> None:
             status["lines"] = (status["lines"] + ["• " + line])[-6:]
+            # An edit per tool call was most of what Telegram counted against the account: one every few seconds
+            # is enough to see it is alive, and every edit carries the newest lines anyway
+            if status["msg"] is not None and time.time() - status["shown"] < PROGRESS_EVERY:
+                return
+            status["shown"] = time.time()
             text = "⚙️ Работаю…\n" + "\n".join(status["lines"])
             try:
                 if status["msg"] is None:
@@ -214,7 +222,8 @@ async def main() -> None:
         answer = task.result()
         if answer is None:
             return "Я ещё занят прошлой задачей. Её можно прервать командой /stop в чате."
-        await send_long(chat, "📞 " + answer, quiet=True)
+        # The copy for the chat goes in the background: if Telegram makes it wait, the call must not
+        spawn(send_long(chat, "📞 " + answer, quiet=True))
         return answer
 
     def owner_persona(cue: str) -> calls.Persona:
@@ -312,9 +321,11 @@ async def main() -> None:
 
     async def cmd_cost(_: str) -> str:
         used, rub = memory.phone_since(config.day_start())
-        return (f"Claude сегодня: ${brain.spent_today():.4f} из ${cfg.daily_limit:.2f} (обнуляется в твою полночь)\n"
-                "Разговор, поиск, напоминания и звонки идут через Gemini: бесплатно. Claude — только для работы "
-                "на ноутбуке и сервере или по слову «подумай».\n"
+        chat_spent = memory.spent_since(config.day_start(), USAGE_PREFIX)
+        return (f"Claude сегодня: ${brain.spent_today():.4f} из ${cfg.daily_limit:.2f} (обнуляется в твою полночь), "
+                f"из них чужие и группы ${chat_spent:.4f} (их потолок ${cfg.chat_daily:.2f}, дальше отвечает Gemini)\n"
+                "Наш с тобой чат и задачи — Claude Haiku (≈$0.0005 за сообщение), «подумай» — Sonnet. Звонки, видео "
+                "и гифки смотрит Gemini: бесплатно.\n"
                 f"Всего: ${memory.spent_since(0):.4f}\n"
                 f"SMS и звонки сегодня: {used} из {cfg.phone_daily_limit}, {rub:.2f} ₽\n"
                 f"Ответов чужим через Gemini сегодня: {memory.peer_replies_since(config.day_start())} "
@@ -327,8 +338,13 @@ async def main() -> None:
             tg = "не подключён" + ("" if cfg.tg_api_id else " (нет TG_API_ID)")
         state_of_gemini = ("подключён: бесплатный чат, чужие, звонки" if gemini.ready
                            else "не подключён (нет GEMINI_API_KEY): всё делает платный Claude, чужим не отвечаю, звонков нет")
+        if account.ready:
+            tg += f"\nЛимиты Telegram: {account.client.pace.status()}"
         return (f"Ноутбук: {'на связи' if hub.online else 'не подключён'}\nСвой Telegram: {tg}\n"
                 f"Gemini: {state_of_gemini}")
+
+    async def cmd_monitor(_: str) -> str:
+        return watch.status()
 
     async def cmd_memory(_: str) -> str:
         return "\n".join(f"#{i}: {t}" for i, t in memory.facts()) or "Пока ничего не запомнил."
@@ -385,7 +401,7 @@ async def main() -> None:
     commands = {"start": cmd_help, "help": cmd_help, "stop": cmd_stop, "reset": cmd_reset, "cost": cmd_cost,
                 "status": cmd_status, "memory": cmd_memory, "voice": cmd_voice, "phonetest": cmd_phonetest,
                 "calltest": cmd_calltest, "watchers": cmd_watchers, "unwatch": cmd_unwatch,
-                "groups": cmd_groups, "group": cmd_group}
+                "groups": cmd_groups, "group": cmd_group, "monitor": cmd_monitor}
 
     def command_of(text: str):
         words = text[1:].split(maxsplit=1) if text.startswith("/") else []
@@ -503,11 +519,22 @@ async def main() -> None:
     async def tell_owner(text: str) -> None:
         await send_long(owner_chat(), text)
 
+    async def monitor_news(text: str, urgent: bool) -> None:
+        """Sites and servers: plain news as a message, a stranger on a server as a call until he answers."""
+        if urgent:
+            spawn(alarm(text))
+        else:
+            await send_long(owner_chat(), "📡 " + text)
+
+    watch = monitor.Monitor(cfg, memory, monitor_news)
+
     spawn(reminders_loop())  # references are kept: asyncio drops tasks nobody holds
     spawn(slang_loop())
     brain.notify, brain.tg = on_event, account
     hub.on_ask, hub.on_stop, hub.on_notice = ask_from_laptop, stop_task, laptop_notice
     spawn(watchers.Watchers(memory, hub, on_event).loop())
+    brain.monitor = watch
+    spawn(watch.loop())
     account.on_owner, account.owner_persona = handle_owner, owner_persona
     account.tell_owner, account.on_owner_seen = tell_owner, owner_seen
     try:

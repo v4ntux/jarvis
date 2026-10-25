@@ -52,6 +52,13 @@ class Config:
     stranger_hourly: int
     stranger_daily: int
     call_minutes: int
+    # Strangers and groups talk to Claude Haiku first (Gemini when it cannot): model, dollars a day, prices
+    chat_model: str
+    chat_daily: float
+    chat_prices: tuple[float, float]
+    # Monitoring: sites to watch (comma-separated), the other VPS, SSH keys of the owner's own machines
+    monitor_sites: str
+    monitor_hosts: str
     # Groups: what Jarvis says in all of them (per group per hour, in total per day), and how often he reacts or
     # comments on his own when nobody called him (share of pictures/videos, share of longer text messages)
     group_hourly: int
@@ -73,9 +80,10 @@ def load() -> Config:
         db_path=os.environ.get("JARVIS_DB", "/opt/jarvis/data/jarvis.db"),
         history_limit=int(os.environ.get("JARVIS_HISTORY", "40")),
         front_history=int(os.environ.get("JARVIS_FRONT_HISTORY", "100")),
+        # Haiku 5.5 and Sonnet 5.5 (the old defaults were Haiku 4.5's, ten times too high)
         prices=(
-            (float(os.environ.get("PRICE_IN", "1")), float(os.environ.get("PRICE_OUT", "5"))),
-            (float(os.environ.get("SMART_PRICE_IN", "3")), float(os.environ.get("SMART_PRICE_OUT", "15"))),
+            (float(os.environ.get("PRICE_IN", "0.1")), float(os.environ.get("PRICE_OUT", "0.5"))),
+            (float(os.environ.get("SMART_PRICE_IN", "2")), float(os.environ.get("SMART_PRICE_OUT", "10"))),
         ),
         task_limit=float(os.environ.get("TASK_LIMIT", "0.60")),
         daily_limit=float(os.environ.get("DAILY_LIMIT", "2")),
@@ -101,6 +109,11 @@ def load() -> Config:
         stranger_hourly=int(os.environ.get("STRANGER_HOURLY", "20")),
         stranger_daily=int(os.environ.get("STRANGER_DAILY", "300")),
         call_minutes=int(os.environ.get("CALL_MINUTES", "10")),
+        chat_model=os.environ.get("CHAT_MODEL", "claude-haiku-5-5"),
+        chat_daily=float(os.environ.get("CHAT_DAILY", "0.5")),
+        chat_prices=(float(os.environ.get("CHAT_PRICE_IN", "0.1")), float(os.environ.get("CHAT_PRICE_OUT", "0.5"))),
+        monitor_sites=os.environ.get("MONITOR_SITES", "https://nvate.uz"),
+        monitor_hosts=os.environ.get("MONITOR_HOSTS", "London=root@46.226.162.170"),
         group_hourly=int(os.environ.get("GROUP_HOURLY", "20")),
         group_daily=int(os.environ.get("GROUP_DAILY", "150")),
         group_react_chance=float(os.environ.get("GROUP_REACT_CHANCE", "0.35")),

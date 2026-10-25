@@ -1,8 +1,9 @@
 """Jarvis's own Telegram account (Telethon).
 
-The owner talks to Jarvis here (free Gemini first, the Claude brain for real work); everyone
-else talks to Gemini alone and never reaches the brain, the tools, the laptop or anything
-Jarvis knows about the owner. Calls go through Gemini Live. Groups, channels and bots are ignored.
+The owner talks to the Claude brain here (Gemini when Claude cannot, and for videos); everyone else
+talks to a plain chat model (Claude Haiku, Gemini as fallback) that never reaches the brain, the tools,
+the laptop or anything Jarvis knows about the owner. Calls go through Gemini Live. In groups he is a
+member with a character; channels and bots are ignored. Every request to Telegram is paced (pace.py).
 """
 import asyncio
 import base64
@@ -18,6 +19,7 @@ from telethon import TelegramClient, events
 
 from . import autonomy, calls, media, style, voice
 from .config import Config
+from .pace import Pace, PacedClient
 from .gemini import Gemini, GeminiError, Strangers
 from .groups import RECENT_MEDIA_SECONDS, Groups
 from .names import name_matches
@@ -49,9 +51,11 @@ OwnerHandler = Callable[..., Awaitable[None]]
 
 def make_client(cfg: Config) -> TelegramClient:
     # Jarvis lives here 24/7 with no bot to fall back on: keep reconnecting however long the outage is
-    return TelegramClient(cfg.tg_session, cfg.tg_api_id, cfg.tg_api_hash, device_model="Jarvis Server",
-                          system_version="Ubuntu", app_version="3.0", lang_code="ru", system_lang_code="ru-RU",
-                          connection_retries=-1, retry_delay=5)
+    client = PacedClient(cfg.tg_session, cfg.tg_api_id, cfg.tg_api_hash, device_model="Jarvis Server",
+                         system_version="Ubuntu", app_version="3.0", lang_code="ru", system_lang_code="ru-RU",
+                         connection_retries=-1, retry_delay=5)
+    client.pace = Pace(cfg.owner_id)  # every message waits its turn: Telegram's limits are never hit head-on
+    return client
 
 
 def display(user) -> str:
@@ -79,7 +83,7 @@ class UserAccount:
         self.on_owner_seen: Callable[[], None] | None = None
         self.call_notes: dict[int, list[str]] = {}
         self._albums_seen: collections.deque = collections.deque(maxlen=200)
-        self.groups = Groups(cfg, strangers.memory, gemini)  # how he behaves in group chats
+        self.groups = Groups(cfg, strangers.memory, strangers.gemini)  # how he behaves in group chats
         self.taste: Taste | None = None  # his own stickers and GIFs, once the account is up
         self.me_id = 0
         self._background: set[asyncio.Task] = set()
@@ -324,7 +328,7 @@ class UserAccount:
         text, tag = m.raw_text or "", media.label(m)
         memory.group_add(chat, m.id, sender.id, name, f"{tag} {text}".strip(), media=bool(tag))
         mode = memory.group_mode(chat)
-        if mode == "off" or not self.gemini or not self.gemini.ready:
+        if mode == "off" or not self.groups.gemini or not self.groups.gemini.ready:
             return
         addressed = self.groups.addressed(text, bool(m.mentioned), await self._replied_to_me(m))
         switch = self.groups.owner_switch(text) if addressed and owner else None
@@ -479,6 +483,21 @@ class UserAccount:
 
     async def send_to(self, user, text: str, files: list[tuple[str, bytes]] | None = None) -> str:
         """A message, photo, album or file from Jarvis's account to a user found by find_user."""
+        from telethon.errors import FloodWaitError, PeerFloodError
+
+        try:
+            what = await self._send_to(user, text, files)
+        except PeerFloodError:
+            return ("Ошибка: Telegram (антиспам) сейчас не даёт моему аккаунту писать первым тем, кто мне не писал. "
+                    "Пусть человек напишет мне сам, или проверь аккаунт в @SpamBot.")
+        except FloodWaitError as e:
+            return f"Ошибка: Telegram просит подождать {e.seconds} с перед следующим сообщением. Отправлю позже, если скажешь."
+        # The chat model sees what Jarvis sent first, so the reply lands in context
+        self.strangers.memory.add_peer(user.id, display(user), "model",
+                                       f"[{what}] {text}".strip() if files else text)
+        return f"Отправил {display(user)}: {what}."
+
+    async def _send_to(self, user, text: str, files: list[tuple[str, bytes]] | None) -> str:
         if files:
             sent = []
             for name, data in files:
@@ -489,14 +508,9 @@ class UserAccount:
             # Several pictures go as one album; anything else as documents
             await self.client.send_file(user, sent if len(sent) > 1 else sent[0], caption=text or None,
                                         parse_mode=None, force_document=not photos)
-            what = (("фото" if photos else "файл") + " " + ", ".join(n for n, _ in files))
-        else:
-            await self.client.send_message(user, text, parse_mode=None, link_preview=False)
-            what = "сообщение"
-        # Gemini sees what Jarvis sent first, so the reply lands in context
-        self.strangers.memory.add_peer(user.id, display(user), "model",
-                                       f"[{what}] {text}".strip() if files else text)
-        return f"Отправил {display(user)}: {what}."
+            return ("фото" if photos else "файл") + " " + ", ".join(n for n, _ in files)
+        await self.client.send_message(user, text, parse_mode=None, link_preview=False)
+        return "сообщение"
 
     async def set_profile(self, username: str = "", first_name: str = "", about: str = "") -> str:
         from telethon.errors import RPCError

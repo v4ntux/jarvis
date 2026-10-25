@@ -39,6 +39,8 @@ CAPABILITIES = """Твои возможности:
 - Телефон пользователя (обычная связь, работает и без интернета): send_sms, phone_call. Платно, только когда просят
   или срочно; Telegram в приоритете.
 - Наблюдатели (add_watcher): «скажи/позвони, если…», «когда закончится…», «каждое утро в 8…». Проверяются без ИИ.
+- Мониторинг 24/7 без ИИ (monitor_status, monitor_site): сайты Вана, главный сервер (входы чужими ключами — звонок
+  сразу, попытки взлома — сводка раз в день, fail2ban их банит) и его лондонский VPS.
 - Свой Telegram-аккаунт (ты сам, не бот): tg_call — позвонить Вану голосом сейчас (бесплатно), tg_send — написать
   человеку или отправить ему фото и файлы от своего имени, tg_chats — кто тебе писал, tg_profile — свой профиль.
   Чужим людям, которые пишут или звонят тебе, отвечает помощник на Gemini."""
@@ -78,6 +80,10 @@ def _stem(name: str) -> str:
 
 
 MAX_STEPS = 60
+# Thinking counts against max_tokens: a tight cap cut the model off mid-thought, before its tool call
+MAX_TOKENS = 16000
+# How hard the model thinks before each step: work (commands, tasks) gets the deep look the owner asked for
+EFFORT_TASK, EFFORT_CHAT = "high", "medium"
 # Everything runs on the cheap model; the smart one only when asked or when the cheap one keeps failing
 ESCALATE_ON_ERRORS = 3
 SMART_WORDS = re.compile(r"подумай|хорошенько|умн(ее|ую)|sonnet|podumay|horoshenko", re.I)
@@ -87,16 +93,31 @@ MAX_RESULT_CHARS = 5000
 # Cache the whole tool catalog: the breakpoint goes on the last tool
 CACHED_TOOLS = TOOLS[:-1] + [{**TOOLS[-1], "cache_control": {"type": "ephemeral"}}]
 
-# Only the really destructive commands wait for a yes: the owner gave Jarvis free hands for everything else
+# Only what cannot be undone, or cuts Jarvis off from the machine, waits for a yes: the owner gave free hands for
+# everything else (plain deletes of files, installs, services, settings). Before, harmless reads like
+# «… | Format-Table» asked too, and every question was one more message for Telegram to count.
 CONFIRMED = {"run_shell": "ноутбуке", "server_shell": "сервере", "server_job": "сервере (в фоне)",
              "add_watcher": "ноутбуке/сервере при каждой проверке наблюдателя"}
 DANGEROUS = re.compile(
-    r"remove-item|\brm\b|\bdel\b|\berase\b|\brmdir\b|\brd\b|format-volume|\bformat\b|clear-content|"
-    r"stop-computer|restart-computer|\bshutdown\b|\breboot\b|\bpoweroff\b|\breg\s+(add|delete)|remove-itemproperty|"
-    r"set-executionpolicy|diskpart|bcdedit|\bcipher\b|uninstall|remove-appx|net\s+user|"
-    r"set-mppreference|netsh\s+(advfirewall|interface)|\bmkfs|\bdd\s+if|"
-    r"systemctl\s+(stop|disable|mask|kill|poweroff|reboot)|git\s+(push\s+.*(--force|-f\b)|reset\s+--hard|clean)|"
-    r"invoke-webrequest.*\|\s*iex|iex\s*\(|curl[^|]*\|\s*(ba)?sh",
+    # deleting whole folders, or what Jarvis and the machine cannot live without
+    r"\brm\b[^|;&]*?\s(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)|remove-item\b[^|;]*-recurse|"
+    r"\b(rmdir|rd|del|erase)\b[^|;&]*\s/s\b|"
+    r"\b(rm|remove-item|del|erase|shred|truncate)\b[^|;&]*(/opt/jarvis/(\.env|data/(tg_user|jarvis\.db))|/etc/|/boot|"
+    r"\.ssh\b)|"
+    # disks, boot, wiping
+    r"format-volume|clear-disk|initialize-disk|diskpart|\bformat\s+[a-z]:|\bmkfs|\bdd\s[^|;]*of=/dev/|bcdedit|"
+    r"cipher\s+/w|"
+    # switching a machine off, or locking Jarvis out of it
+    r"stop-computer|restart-computer|\bshutdown\b|\breboot\b|\bpoweroff\b|\bhalt\b|"
+    r"systemctl\s+(poweroff|reboot|halt|(stop|disable|mask|kill)\s[^|;&]*\b(jarvis|sshd?|tailscaled)\b)|"
+    r"\bufw\s+(disable|reset|deny|delete)|iptables\s+-[FPX]|netsh\s+advfirewall|"
+    # accounts and passwords, antivirus, registry deletes
+    r"\bpasswd\b|\bchpasswd\b|\buserdel\b|net\s+user\s+\S+\s+/(add|delete)|set-mppreference|reg\s+delete|"
+    r"remove-itemproperty|"
+    # lost work in git
+    r"git\s+(push\s[^|;]*(--force|-f\b)|reset\s+--hard|clean\s+-\w*f)|"
+    # running a script straight from the internet: a web page could have put it there
+    r"invoke-webrequest[^|]*\|\s*iex|\biex\s*\(|\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba)?sh\b",
     re.I,
 )
 
@@ -182,6 +203,7 @@ class Brain:
         self.notify: Callable[[dict, str], Awaitable[None]] | None = None
         # Set by the bot: Jarvis's own Telegram account (tg_user.UserAccount), for calls and messages
         self.tg = None
+        self.monitor = None  # set by the bot: sites and servers watched around the clock (monitor.Monitor)
 
     def _system(self) -> list[dict]:
         # The stable part is cached across requests; time and laptop state change, so they go after it
@@ -217,8 +239,10 @@ class Brain:
         close = difflib.get_close_matches(wanted, list(known), n=1, cutoff=0.85)
         return known[close[0]] if close else None
 
-    async def reply(self, text: str, session: Session, images: list[str] | None = None, task: bool = False) -> str:
-        """task: the request is known to be work (it came from the chat helper), not small talk."""
+    async def reply(self, text: str, session: Session, images: list[str] | None = None, task: bool = False,
+                    hint: str = "") -> str:
+        """task: the request is known to be work (it came from the chat helper), not small talk.
+        hint: a line for this answer only (the urge to send a sticker), never stored in the history."""
         routine = None if images else self._routine_command(text)
         if routine:
             self.memory.add("user", text)
@@ -235,11 +259,16 @@ class Brain:
                 *({"type": "image", "source": {"type": "base64", "media_type": _media_type(b), "data": b}}
                   for b in images),
                 {"type": "text", "text": text}]}
+        if hint:
+            last = messages[-1]
+            last["content"] = (last["content"] + "\n" + hint if isinstance(last["content"], str)
+                               else last["content"] + [{"type": "text", "text": hint}])
         system = self._system()
         answer, spent, stop_note, log, errors = "", 0.0, "", [], 0
         smart = bool(SMART_WORDS.search(text))
         plan = session.plan = Plan()
         task = task or autonomy.looks_like_task(text)
+        thinking = {"output_config": {"effort": EFFORT_TASK if task else EFFORT_CHAT}}
         force_plan = autonomy.is_complex(text)
         nudges = streak = dithered = 0  # pushes to keep going, failed tool calls in a row, pushes against dithering
         declined = False  # the owner said no to something: nothing is pushed against that
@@ -267,12 +296,14 @@ class Brain:
                 _mark_cache(messages)
                 try:
                     resp = await self.client.messages.create(
-                        model=model, max_tokens=2048, system=system, tools=CACHED_TOOLS, messages=messages, **extra)
+                        model=model, max_tokens=MAX_TOKENS, system=system, tools=CACHED_TOOLS, messages=messages,
+                        **thinking, **extra)
                 except anthropic.BadRequestError as e:
                     if not extra or "tool_choice" not in str(e):
                         raise
                     resp = await self.client.messages.create(  # a model that refuses to be forced: just ask nicely
-                        model=model, max_tokens=2048, system=system, tools=CACHED_TOOLS, messages=messages)
+                        model=model, max_tokens=MAX_TOKENS, system=system, tools=CACHED_TOOLS, messages=messages,
+                        **thinking)
                 spent += self._log_usage(model, resp.usage)
                 answer = "".join(b.text for b in resp.content if b.type == "text").strip()
                 if resp.stop_reason != "tool_use":
@@ -486,6 +517,12 @@ class Brain:
                 lines += [f"  {'он' if role == 'user' else 'я'}: {text[:300]}"
                           for role, text in self.memory.peer_history(peer, 6)]
             return "\n".join(lines) or "Мне пока никто не писал."
+        if name in ("monitor_status", "monitor_site"):
+            if not self.monitor:
+                return "Ошибка: мониторинг не запущен."
+            if name == "monitor_status":
+                return self.monitor.status()
+            return (self.monitor.remove_site if args.get("remove") else self.monitor.add_site)(args["url"])
         if name == "list_watchers":
             return "\n".join(f"#{i} {watchers.describe(spec)}" + (f" [ошибка: {st['error']}]" if st.get("error") else "")
                              for i, spec, st, _ in self.memory.watchers()) or "Наблюдателей нет."

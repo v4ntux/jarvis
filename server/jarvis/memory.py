@@ -97,9 +97,18 @@ class Memory:
         )
         self.db.commit()
 
-    def spent_since(self, ts: float) -> float:
-        row = self.db.execute("SELECT COALESCE(SUM(cost), 0) FROM usage WHERE ts >= ?", (ts,)).fetchone()
+    def spent_since(self, ts: float, prefix: str = "") -> float:
+        """Dollars spent since ts; prefix narrows it to models logged under that name (e.g. «chat:»)."""
+        row = self.db.execute("SELECT COALESCE(SUM(cost), 0) FROM usage WHERE ts >= ? AND model LIKE ?",
+                              (ts, prefix + "%")).fetchone()
         return row[0]
+
+    def drop_last(self, role: str, content: str) -> None:
+        """Takes back the newest message if it is this one: a request another model then answers is stored once."""
+        row = self.db.execute("SELECT id, role, content FROM messages ORDER BY id DESC LIMIT 1").fetchone()
+        if row and row[1] == role and row[2] == content:
+            self.db.execute("DELETE FROM messages WHERE id = ?", (row[0],))
+            self.db.commit()
 
     # Long-term facts about the user; all of them go into the system prompt
     def remember(self, text: str) -> int:

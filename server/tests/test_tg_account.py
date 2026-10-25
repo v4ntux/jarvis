@@ -11,9 +11,11 @@ import time
 import unittest
 from unittest.mock import patch
 
+import anthropic
+import httpx
 import numpy as np
 
-from jarvis import calls, config, gemini, tg_user, voice
+from jarvis import calls, config, gemini, style, tg_user, voice
 from jarvis.front import FREE_TOOLS, Front
 from jarvis.memory import Memory
 from jarvis.transport import UserChat
@@ -43,7 +45,7 @@ class FakeGemini:
             raise answer
         return answer
 
-    async def text(self, system, contents, max_tokens=2048, models=None):
+    async def text(self, system, contents, max_tokens=2048, models=None, **_):
         return gemini.text_of(await self.generate(system, contents, models=models))
 
 
@@ -114,12 +116,21 @@ class FakeBrain:
 
     def __init__(self, memory):
         self.memory, self.cfg, self.hub = memory, make_cfg(), FakeHub()
-        self.replies, self.tools = [], []
+        self.replies, self.tools, self.hints = [], [], []
+        self.down = 0  # how many of the next requests fail as if Anthropic were unreachable
+        self.spent = 0.0
 
-    async def reply(self, text, session, images=None, task=False):
+    async def reply(self, text, session, images=None, task=False, hint=""):
+        if self.down:
+            self.down -= 1
+            raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com"))
         self.replies.append(text)
+        self.hints.append(hint)
         self.task = task
         return "сделал на ноутбуке ($0.02)"
+
+    def spent_today(self):
+        return self.spent
 
     async def _run_tool(self, name, args, session):
         self.tools.append((name, args))
@@ -127,6 +138,14 @@ class FakeBrain:
 
     def _routine_command(self, text):
         return "почта" if text == "сделай почту" else None
+
+
+class Dice:
+    def __init__(self, value):
+        self.value = value
+
+    def random(self):
+        return self.value
 
 
 class FakeSession:
@@ -155,13 +174,36 @@ class FrontTests(unittest.IsolatedAsyncioTestCase):
         f = Front(self.brain, FakeGemini(*answers, ready=ready))
         return f
 
-    async def test_small_talk_is_free(self):
+    async def test_the_owner_talks_to_claude(self):
+        f = self.front()
+        self.assertEqual(await f.reply("привет", FakeSession()), "сделал на ноутбуке ($0.02)")
+        self.assertEqual(self.brain.replies, ["привет"])
+        self.assertEqual(f.gemini.seen, [])
+
+    async def test_small_talk_now_and_then_carries_the_sticker_urge(self):
+        f = self.front()
+        f.rng = Dice(0.0)
+        await f.reply("как дела", FakeSession())
+        await f.reply("открой блокнот", FakeSession())  # work never gets it
+        self.assertEqual(self.brain.hints, [style.URGE, ""])
+
+    async def test_claude_down_gemini_answers_and_the_request_is_stored_once(self):
+        self.memory.add("user", "привет")  # what the brain had stored before it failed
+        self.brain.down = 1
         f = self.front([{"text": "Привет, Ван."}])
         self.assertEqual(await f.reply("привет", FakeSession()), "Привет, Ван.")
         self.assertEqual(self.brain.replies, [])
         self.assertEqual([m["content"] for m in self.memory.recent(5)], ["привет", "Привет, Ван."])
 
+    async def test_todays_money_spent_chat_goes_to_gemini_but_work_still_to_claude(self):
+        self.brain.spent = 100.0
+        f = self.front([{"text": "Норм."}])
+        self.assertEqual(await f.reply("как дела", FakeSession()), "Норм.")
+        await f.reply("открой блокнот", FakeSession())
+        self.assertEqual(self.brain.replies, ["открой блокнот"])  # the brain itself says the limit is reached
+
     async def test_free_tool_then_answer(self):
+        self.brain.down = 1
         f = self.front([{"functionCall": {"name": "set_reminder", "args": {"text": "чайник", "in_minutes": 10}}}],
                        [{"text": "Напомню через 10 минут."}])
         self.assertEqual(await f.reply("напомни про чайник", FakeSession()), "Напомню через 10 минут.")
@@ -172,6 +214,7 @@ class FrontTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[действия: set_reminder]", self.memory.recent(5)[-1]["content"])
 
     async def test_real_work_goes_to_the_brain(self):
+        self.brain.down = 1  # Gemini stands in, and still hands the work over
         f = self.front([{"functionCall": {"name": "delegate", "args": {"task": "открыть блокнот"}}}])
         self.assertEqual(await f.reply("открой блокнот", FakeSession()), "сделал на ноутбуке ($0.02)")
         self.assertEqual(self.brain.replies, ["открой блокнот"])  # his own words, not Gemini's paraphrase
@@ -179,17 +222,20 @@ class FrontTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.memory.recent(5), [])  # the brain keeps its own history
 
     async def test_saying_it_hands_over_without_calling_still_hands_over(self):
+        self.brain.down = 1
         f = self.front([{"text": "Это работа для сервера. Передаю задачу старшему мозгу."}])
         await f.reply("скачай видео", FakeSession())
         self.assertEqual(self.brain.replies, ["скачай видео"])
 
     async def test_unknown_tool_is_real_work_too(self):
+        self.brain.down = 1
         f = self.front([{"functionCall": {"name": "run_shell", "args": {"command": "dir"}}}])
         await f.reply("покажи файлы", FakeSession())
         self.assertEqual(len(self.brain.replies), 1)
         self.assertEqual(self.brain.tools, [])
 
     async def test_gemini_down_brain_answers_with_what_was_done(self):
+        self.brain.down = 1
         f = self.front([{"functionCall": {"name": "remember", "args": {"text": "кот Барсик"}}}],
                        gemini.GeminiError("503"))
         await f.reply("запомни кота", FakeSession())
@@ -212,17 +258,20 @@ class FrontTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.asked, [])
 
     async def test_a_task_answered_with_a_question_goes_to_the_brain(self):
+        self.brain.down = 1
         f = self.front([{"text": "Кому именно отправить? Скажи ник."}])
         await f.reply("отправь 20 рилсов Заке", FakeSession())
         self.assertEqual(len(self.brain.replies), 1)
         self.assertIn("без вопросов", self.brain.replies[0])
 
     async def test_a_chat_question_is_just_answered(self):
+        self.brain.down = 1
         f = self.front([{"text": "Нормально! А у тебя как?"}])
         self.assertEqual(await f.reply("как дела", FakeSession()), "Нормально! А у тебя как?")
         self.assertEqual(self.brain.replies, [])
 
     async def test_reaction_is_kept_out_of_the_history(self):
+        self.brain.down = 1
         f = self.front([{"text": "РЕАКЦИЯ: 🔥\nБаян, но зашёл."}])
         answer = await f.reply("[гифка]", FakeSession())
         self.assertTrue(answer.startswith("РЕАКЦИЯ: 🔥"))  # the chat strips it and puts the emoji under the message

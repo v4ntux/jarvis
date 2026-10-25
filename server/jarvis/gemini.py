@@ -84,6 +84,15 @@ def text_of(parts: list[dict]) -> str:
     return "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
 
 
+def _has_media(contents: list[dict]) -> bool:
+    return any("inlineData" in p for c in contents for p in c.get("parts", []))
+
+
+def _without_media(contents: list[dict]) -> list[dict]:
+    return [{**c, "parts": [p if "inlineData" not in p else {"text": "[вложение не открылось]"}
+                            for p in c.get("parts", [])]} for c in contents]
+
+
 def rest_for(status: int, data) -> float:
     """Seconds to leave a model alone: the free tier's daily quota says when it resets, overload passes soon."""
     error = data.get("error") if isinstance(data, dict) else None
@@ -130,6 +139,16 @@ class Gemini:
                 self.resting[model] = time.time() + rest_for(status, data)
                 errors.append(f"{model}: {status}")
                 continue
+            if status == 400 and _has_media(contents):
+                # Some stickers and thumbnails are refused as «invalid argument»: answer from the words alone
+                log.warning("Gemini %s refused an attachment, asking without it", model)
+                contents = _without_media(contents)
+                body["contents"] = contents
+                try:
+                    status, data = await self._post(model, body)
+                except httpx.HTTPError as e:
+                    errors.append(f"{model}: {type(e).__name__}")
+                    continue
             if status != 200:
                 raise GeminiError(f"Gemini {model} ответил {status}: {str(data)[:300]}")
             candidate = (data.get("candidates") or [{}])[0]
@@ -140,7 +159,8 @@ class Gemini:
         raise GeminiError("Gemini не ответил: " + "; ".join(errors))
 
     async def text(self, system: str, contents: list[dict], max_tokens: int = 2048,
-                   models: list[str] | None = None) -> str:
+                   models: list[str] | None = None, effort: str = "") -> str:
+        """effort is Claude's (how hard it thinks first); Gemini here always thinks the minimum."""
         return text_of(await self.generate(system, contents, max_tokens=max_tokens, models=models))
 
     async def transcribe(self, audio: bytes, mime: str) -> str:
@@ -192,11 +212,14 @@ class Strangers:
             contents[-1]["parts"].append({"text": urge})  # not stored: it is only a nudge for this answer
         if media:
             contents[-1]["parts"] += media
-        answer = await self.gemini.text(self.persona(), contents, 1024, models=self.gemini.lite_first)
+        answer = await self.gemini.text(self.persona(), contents, 1024, models=self.gemini.lite_first,
+                                        effort="medium")
         if answer.strip().upper().rstrip(".!") == SPAM:
             self.memory.drop_last_peer(peer)  # junk must not become the context of the next real talk
             return Reply("", spam=True)
         marks = style.split_marks(answer)
         answer, note = split_note(marks.text)
+        if answer.upper().startswith(style.SILENT):
+            answer = ""  # a troll who will not stop gets no more messages: each one is a chance to be reported
         self.memory.add_peer(peer, name, "model", answer or style.describe_marks(marks) or "…")
         return Reply(answer, note, marks.reaction, sticker=marks.sticker, gif=marks.gif, love=marks.love)

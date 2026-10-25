@@ -49,7 +49,7 @@ class FakeGemini:
     def __init__(self, *answers):
         self.answers, self.seen = list(answers), []
 
-    async def text(self, system, contents, max_tokens=2048, models=None):
+    async def text(self, system, contents, max_tokens=2048, models=None, **_):
         self.seen.append({"system": system, "contents": contents, "models": models})
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
@@ -254,7 +254,8 @@ class GroupFlowTests(unittest.IsolatedAsyncioTestCase):
 
     def account(self, *answers, chance=0.99, **changes):
         self.gemini = FakeGemini(*answers)
-        account = tg_user.UserAccount(make_cfg(**changes), SimpleNamespace(memory=self.memory), self.gemini, self.tmp.name)
+        account = tg_user.UserAccount(make_cfg(**changes), SimpleNamespace(memory=self.memory, gemini=self.gemini), self.gemini,
+                                     self.tmp.name)
         account.client, account.me_id, account.groups.me_id = FakeClient(), ME, ME
         account.groups.rng = Dice(chance)  # 0.99: he never speaks up on his own; 0.0: he always does
         account.taste = FakeTaste()
@@ -392,7 +393,7 @@ class GroupFlowTests(unittest.IsolatedAsyncioTestCase):
         a = self.account("МОЛЧУ")
         verdict = await a.groups.answer(CHAT, "Мемасы", "Аня", "Джарвис, сколько 2+2", "", [])
         self.assertEqual((verdict.answer, verdict.reaction), ("", "👀"))
-        self.assertIn("промолчать нельзя", self.gemini.seen[0]["contents"][0]["parts"][0]["text"])
+        self.assertIn("игнорировать нельзя", self.gemini.seen[0]["contents"][0]["parts"][0]["text"])
 
     async def test_now_and_then_he_gets_the_urge_for_a_sticker(self):
         a = self.account("ок", "ок", chance=0.0)

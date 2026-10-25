@@ -1,13 +1,17 @@
-"""The owner's everyday chat, free: Gemini talks, looks at memes and uses the simple tools itself.
+"""The owner's chat: Claude (the brain) answers him; Gemini looks at what Claude cannot see and stands in.
 
-Real work on the laptop or the server goes to the Claude brain through «delegate»: that is the only part
-that costs money. If Gemini is down, or answers a task with a question or an excuse, the brain takes over.
+Claude Haiku 5.5 costs about a cent per hundred messages, thinks before it answers and never runs out of a
+free daily quota, so the owner talks to the brain itself. Gemini takes videos, GIFs and sound (Claude sees
+pictures only), the owner's messages when Claude fails or today's money is spent, and the calls (Gemini
+Live). Real work it gets goes back to the brain through «delegate».
 """
 import asyncio
 import datetime as dt
 import logging
 import random
 import re
+
+import anthropic
 
 from . import archive, autonomy, style
 from .brain import HEAD, SMART_WORDS, Brain, Session, _media_type, _short
@@ -20,7 +24,7 @@ log = logging.getLogger("jarvis.front")
 # Server-side and cheap: Gemini runs these itself; everything else is the brain's job
 FREE_TOOLS = ("web_search", "read_url", "remember", "forget", "learn_slang", "set_reminder", "list_reminders",
               "add_watcher", "list_watchers", "remove_watcher", "tg_call", "tg_send", "tg_chats", "tg_profile",
-              "send_sms", "phone_call", "server_jobs")
+              "send_sms", "phone_call", "server_jobs", "monitor_status", "monitor_site")
 MAX_STEPS = 6
 MAX_RESULT = 4000
 HANDED_OVER = re.compile(r"переда(ю|м|ла?)\b[^.]*(мозг|claude|клод)|старш\w* мозг|\bdelegate\b", re.I)
@@ -39,7 +43,7 @@ RULES = """Как ты работаешь:
 (add_watcher: «скажи, если…», «каждое утро в 8…»), свой Telegram-аккаунт (tg_call — позвонить Вану сейчас, tg_send —
 написать человеку или отправить ему фото, файлы, скриншот экрана, tg_chats — кто тебе писал, tg_profile — имя, username
 и описание аккаунта), SMS и звонок робота на телефон (send_sms, phone_call: платно, только по просьбе или когда очень
-срочно).
+срочно), мониторинг сайтов и серверов (monitor_status, monitor_site).
 Всё остальное — delegate: ноутбук, сервер, файлы, браузер, клики, команды, длинные задачи из нескольких шагов, код.
 Вызывай delegate сразу, не пиши «передаю». Не отказывайся и не говори «не могу», если это может сделать delegate.
 
@@ -100,13 +104,22 @@ class Front:
                     media: list[dict] | None = None) -> str:
         """media: parts of stickers, GIFs and videos for Gemini's eyes only (Claude never sees them)."""
         session.request = text
-        # «подумай», learned routines and a Gemini without a key go straight to the brain
-        if not self.gemini.ready or SMART_WORDS.search(text) or (not images and self.brain._routine_command(text)):
-            return await self.brain.reply(text, session, images)
+        task = autonomy.looks_like_task(text)
+        out_of_money = self.brain.spent_today() >= self.cfg.daily_limit and not task
+        if not self.gemini.ready or (not media and not out_of_money) or SMART_WORDS.search(text) or \
+                (not images and self.brain._routine_command(text)):
+            urge = "" if task else style.impulse(self.rng, self.cfg.extra_chance)
+            try:
+                return await self.brain.reply(text, session, images, hint=urge)
+            except (anthropic.APIStatusError, anthropic.APIConnectionError) as e:
+                if not self.gemini.ready:
+                    raise
+                log.warning("Claude failed, Gemini answers the owner: %s", str(e)[:300])
+                self.memory.drop_last("user", text)
         history = [{"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]}
                    for m in self.memory.recent(self.cfg.front_history) if isinstance(m["content"], str)]
         asked = [{"text": text}]
-        urge = "" if autonomy.looks_like_task(text) else style.impulse(self.rng, self.cfg.extra_chance)
+        urge = "" if task else style.impulse(self.rng, self.cfg.extra_chance)
         if urge:
             asked.append({"text": urge})  # small talk now and then gets the urge to send a sticker or a GIF
         asked += [{"inlineData": {"mimeType": _media_type(b), "data": b}} for b in images or []]
