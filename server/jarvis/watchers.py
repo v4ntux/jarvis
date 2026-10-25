@@ -38,7 +38,7 @@ def _days(text: str) -> set[int]:
 
 
 def next_time(at: str, days: str, after: float) -> float:
-    """Next moment at HH:MM Moscow time on one of the days, strictly after `after`."""
+    """Next moment at HH:MM on the owner's clock on one of the days, strictly after `after`."""
     hour, minute = (int(p) for p in at.split(":"))
     allowed = _days(days)
     base = dt.datetime.fromtimestamp(after, TZ)
@@ -63,7 +63,9 @@ def normalize(args: dict) -> dict:
         at = (args.get("at") or "").strip()
         if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", at):
             raise ValueError("для time нужно at в виде ЧЧ:ММ")
-        spec.update(at=at, days=(args.get("days") or "daily").strip().lower())
+        days = (args.get("days") or "").strip().lower()
+        # No days named: a one-off for the next HH:MM. Naming days (daily, weekdays, ...) makes it repeat.
+        spec.update(at=at, days=days or "daily", once=bool(args["once"]) if "once" in args else not days)
         _days(spec["days"])
         return spec
     if source == "laptop_offline":
@@ -95,7 +97,7 @@ def first_check(spec: dict, now: float) -> float:
 def describe(spec: dict) -> str:
     s = spec["source"]
     if s == "time":
-        when = f"в {spec['at']}, дни: {spec['days']}"
+        when = f"один раз в {spec['at']}" if spec.get("once") else f"в {spec['at']}, дни: {spec['days']}"
     elif s == "laptop_offline":
         when = f"ноутбук пропал дольше {spec['minutes']} мин"
     elif s == "laptop_online":

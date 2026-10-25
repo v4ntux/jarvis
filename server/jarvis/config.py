@@ -3,12 +3,13 @@ import os
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
-# The owner lives on Moscow time: reminders, schedules and the daily limit follow it
-TZ = ZoneInfo("Europe/Moscow")
+# The owner's clock (UTC+5: his phone showed 15:41 when the server said 10:41 UTC): every «в 18:00», reminder,
+# schedule and the daily limit follow it
+TZ = ZoneInfo(os.environ.get("OWNER_TZ", "Asia/Tashkent"))
 
 
 def day_start() -> float:
-    """Last Moscow midnight: daily limits reset here."""
+    """Last midnight on the owner's clock: daily limits reset here."""
     return dt.datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
@@ -20,10 +21,11 @@ class Config:
     model: str
     smart_model: str
     db_path: str
-    history_limit: int
+    history_limit: int  # messages the Claude brain sees
+    front_history: int  # messages the free Gemini chat sees
     # USD per million tokens (input, output) for (model, smart_model); only for the spend counter
     prices: tuple[tuple[float, float], tuple[float, float]]
-    # USD caps: one request, and everything since Moscow midnight
+    # USD caps: one request, and everything since the owner's midnight
     task_limit: float
     daily_limit: float
     hands_token: str
@@ -61,12 +63,13 @@ def load() -> Config:
         model=os.environ.get("JARVIS_MODEL", "claude-haiku-5-5"),
         smart_model=os.environ.get("JARVIS_SMART_MODEL", "claude-sonnet-5-5"),
         db_path=os.environ.get("JARVIS_DB", "/opt/jarvis/data/jarvis.db"),
-        history_limit=int(os.environ.get("JARVIS_HISTORY", "10")),
+        history_limit=int(os.environ.get("JARVIS_HISTORY", "40")),
+        front_history=int(os.environ.get("JARVIS_FRONT_HISTORY", "100")),
         prices=(
             (float(os.environ.get("PRICE_IN", "1")), float(os.environ.get("PRICE_OUT", "5"))),
             (float(os.environ.get("SMART_PRICE_IN", "3")), float(os.environ.get("SMART_PRICE_OUT", "15"))),
         ),
-        task_limit=float(os.environ.get("TASK_LIMIT", "0.30")),
+        task_limit=float(os.environ.get("TASK_LIMIT", "0.60")),
         daily_limit=float(os.environ.get("DAILY_LIMIT", "2")),
         hands_token=os.environ["HANDS_TOKEN"],
         # Tailscale address only: the hub is never exposed to the internet

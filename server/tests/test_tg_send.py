@@ -116,6 +116,25 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         user, text, files = self.account.sent[0]
         self.assertEqual((user, text, files), (SARDOR, "Смотри", [("photo_5.jpg", b"jpeg")]))
 
+    async def test_a_name_the_owner_said_needs_no_question(self):
+        session = Session()
+        session.request = "отправь Сардору это фото"
+        self.assertEqual(await self.send(session, to="Сардор", file="photo_5.jpg"), "Отправил.")
+        self.assertEqual(session.asked, [])
+        self.assertEqual(len(self.account.sent), 1)
+
+    async def test_a_name_from_earlier_in_the_talk_counts_too(self):
+        self.memory.add("user", "Сардор просил фотки с вчера")
+        session = Session()
+        await self.send(session, to="Сардор", file="photo_5.jpg")
+        self.assertEqual(session.asked, [])
+
+    async def test_a_name_nobody_said_still_asks(self):
+        session = Session()
+        session.request = "отправь это фото"
+        await self.send(session, to="Сардор", file="photo_5.jpg")
+        self.assertIn("Это имя ты не называл", session.asked[0])
+
     async def test_album_of_several_photos(self):
         await self.send(to="Сардор", file="photo_5.jpg, photo_6.jpg")
         self.assertEqual([n for n, _ in self.account.sent[0][2]], ["photo_5.jpg", "photo_6.jpg"])

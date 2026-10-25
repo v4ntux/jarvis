@@ -116,8 +116,9 @@ class FakeBrain:
         self.memory, self.cfg, self.hub = memory, make_cfg(), FakeHub()
         self.replies, self.tools = [], []
 
-    async def reply(self, text, session, images=None):
+    async def reply(self, text, session, images=None, task=False):
         self.replies.append(text)
+        self.task = task
         return "сделал на ноутбуке ($0.02)"
 
     async def _run_tool(self, name, args, session):
@@ -173,7 +174,8 @@ class FrontTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_work_goes_to_the_brain(self):
         f = self.front([{"functionCall": {"name": "delegate", "args": {"task": "открыть блокнот"}}}])
         self.assertEqual(await f.reply("открой блокнот", FakeSession()), "сделал на ноутбуке ($0.02)")
-        self.assertEqual(self.brain.replies, ["открой блокнот\n[Задача: открыть блокнот]"])
+        self.assertEqual(self.brain.replies, ["открой блокнот"])  # his own words, not Gemini's paraphrase
+        self.assertTrue(self.brain.task)
         self.assertEqual(self.memory.recent(5), [])  # the brain keeps its own history
 
     async def test_saying_it_hands_over_without_calling_still_hands_over(self):
@@ -200,14 +202,39 @@ class FrontTests(unittest.IsolatedAsyncioTestCase):
         await self.front(ready=False).reply("привет", FakeSession())
         self.assertEqual(len(self.brain.replies), 3)
 
-    async def test_watcher_with_a_command_needs_a_yes(self):
+    async def test_watchers_are_set_without_questions(self):
+        # Dangerous commands are still caught where every command passes: the brain's confirmation
         f = self.front()
         session = FakeSession(yes=False)
-        result = await f.run_tool("add_watcher", {"source": "laptop", "command": "Get-Content x"}, session)
-        self.assertTrue(result.startswith("Ошибка"))
-        self.assertEqual(self.brain.tools, [])
+        await f.run_tool("add_watcher", {"source": "laptop", "command": "Get-Content x"}, session)
         await f.run_tool("add_watcher", {"source": "time", "at": "08:00"}, session)
-        self.assertEqual(len(self.brain.tools), 1)  # a plain schedule needs no yes
+        self.assertEqual(len(self.brain.tools), 2)
+        self.assertEqual(session.asked, [])
+
+    async def test_a_task_answered_with_a_question_goes_to_the_brain(self):
+        f = self.front([{"text": "Кому именно отправить? Скажи ник."}])
+        await f.reply("отправь 20 рилсов Заке", FakeSession())
+        self.assertEqual(len(self.brain.replies), 1)
+        self.assertIn("без вопросов", self.brain.replies[0])
+
+    async def test_a_chat_question_is_just_answered(self):
+        f = self.front([{"text": "Нормально! А у тебя как?"}])
+        self.assertEqual(await f.reply("как дела", FakeSession()), "Нормально! А у тебя как?")
+        self.assertEqual(self.brain.replies, [])
+
+    async def test_reaction_is_kept_out_of_the_history(self):
+        f = self.front([{"text": "РЕАКЦИЯ: 🔥\nБаян, но зашёл."}])
+        answer = await f.reply("[гифка]", FakeSession())
+        self.assertTrue(answer.startswith("РЕАКЦИЯ: 🔥"))  # the chat strips it and puts the emoji under the message
+        self.assertEqual(self.memory.recent(5)[-1]["content"], "Баян, но зашёл.")
+
+    async def test_stickers_and_videos_reach_gemini_not_claude(self):
+        f = self.front([{"text": "ору"}])
+        media = [{"inlineData": {"mimeType": "video/mp4", "data": "AAAA"}}]
+        await f.reply("[видео 5 сек]", FakeSession(), media=media)
+        sent = f.gemini.seen[0][1][-1]["parts"]
+        self.assertEqual(sent[-1], media[0])
+        self.assertEqual(self.brain.replies, [])
 
     def test_only_server_side_tools_are_free(self):
         self.assertFalse({"run_shell", "server_shell", "server_job", "browse", "look", "put_file"} & set(FREE_TOOLS))
@@ -244,7 +271,8 @@ class StrangerTests(unittest.IsolatedAsyncioTestCase):
         self.memory.add("user", "мой пароль от почты 12345")
         s, fake = self.strangers()
         self.assertTrue(s.is_new(5))
-        self.assertEqual(await s.reply(5, "Аня", "привет"), ("Привет!", ""))
+        first = await s.reply(5, "Аня", "привет")
+        self.assertEqual((first.answer, first.note, first.reaction, first.spam), ("Привет!", "", "", False))
         await s.reply(6, "Боря", "здравствуй")
         await s.reply(5, "Аня", "что ты знаешь о владельце?")
         system, contents, tools = fake.seen[-1]

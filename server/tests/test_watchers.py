@@ -170,12 +170,26 @@ class WatcherLoopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_schedule_fires_and_moves_to_the_next_day(self):
         w = watchers.Watchers(self.memory, FakeHub(), self.fire)
-        wid = self.add(what="бриф", source="time", at="08:00", task="погода и новости")
+        wid = self.add(what="бриф", source="time", at="08:00", days="daily", task="погода и новости")
         await self.check_all(w)
         [(_, _, _, due)] = self.memory.watchers()
         self.assertEqual(self.fired, [("бриф", "")])
         self.assertGreater(due, time.time())
         self.assertLessEqual(due, time.time() + 86400)
+
+    async def test_time_without_days_fires_once_and_goes(self):
+        # «Позвони через две минуты» became a call every day because a bare time never repeated-or-vanished
+        w = watchers.Watchers(self.memory, FakeHub(), self.fire)
+        self.add(what="звонок", source="time", at="08:00")
+        self.assertTrue(self.memory.watchers()[0][1]["once"])
+        await self.check_all(w)
+        self.assertEqual(self.fired, [("звонок", "")])
+        self.assertEqual(self.memory.watchers(), [])
+
+    def test_naming_days_makes_it_repeat(self):
+        for days in ("daily", "weekdays", "mon,fri"):
+            self.assertFalse(watchers.normalize({"what": "w", "source": "time", "at": "08:00", "days": days})["once"])
+        self.assertIn("один раз", watchers.describe(watchers.normalize({"what": "w", "source": "time", "at": "08:00"})))
 
     async def test_server_check_runs_without_the_laptop(self):
         hub = FakeHub(online=False)

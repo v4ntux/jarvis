@@ -34,6 +34,19 @@ def file_request(path: str, caption: str) -> tuple[str, list[str] | None]:
     return text, None
 
 
+async def react(client, msg, emoji: str) -> None:
+    """An emoji reaction under a message, like a person's like. Telegram refuses emoji it does not offer: ignored."""
+    from telethon.errors import RPCError
+    from telethon.tl.functions.messages import SendReactionRequest
+    from telethon.tl.types import ReactionEmoji
+
+    try:
+        await client(SendReactionRequest(peer=await msg.get_input_chat(), msg_id=msg.id,
+                                         reaction=[ReactionEmoji(emoticon=emoji)]))
+    except RPCError:
+        pass
+
+
 class BotChat:
     # Shared by every bot chat: the button handler finds the question by its key
     confirms: dict[str, asyncio.Future] = {}
@@ -69,6 +82,9 @@ class BotChat:
 
     async def send_voice(self, path: str) -> None:
         await self.bot.send_voice(self.chat_id, FSInputFile(path))
+
+    async def react(self, emoji: str) -> None:
+        pass  # the bot has no message to put it under
 
     async def confirm(self, question: str) -> bool:
         key = uuid.uuid4().hex[:12]
@@ -123,6 +139,9 @@ class LogChat:
     async def send_voice(self, path: str) -> None:
         pass
 
+    async def react(self, emoji: str) -> None:
+        pass
+
     async def confirm(self, question: str) -> bool:
         return False
 
@@ -133,6 +152,11 @@ class UserChat:
     def __init__(self, client, peer: int):
         self.client, self.peer = client, peer
         self.pending: asyncio.Future | None = None
+        self.last = None  # the owner's newest message: what a reaction goes under
+
+    async def react(self, emoji: str) -> None:
+        if self.last is not None:
+            await react(self.client, self.last, emoji)
 
     async def say(self, text: str, quiet: bool = False):
         return await self.client.send_message(self.peer, text, link_preview=False, silent=quiet, parse_mode=None)

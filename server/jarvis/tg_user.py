@@ -14,10 +14,11 @@ from typing import Awaitable, Callable
 
 from telethon import TelegramClient, events
 
-from . import calls, voice
+from . import autonomy, calls, media, voice
 from .config import Config
 from .gemini import Gemini, GeminiError, Strangers
-from .transport import IMAGE_EXT, UserChat
+from .names import name_matches
+from .transport import IMAGE_EXT, UserChat, react
 
 log = logging.getLogger("jarvis.tg")
 
@@ -25,6 +26,7 @@ SERVICE = 777000  # Telegram's own notices, login codes among them: never answer
 MAX_FILE = 200 * 1024 * 1024
 MAX_STRANGER_VOICE = 120  # seconds: longer voice messages from strangers are not worth the quota
 MAX_ALBUM_IMAGES = 6  # the model looks at this many pictures of an album; all of them are saved
+SPAM_BLOCK_AFTER = 3  # junk messages from one stranger before Telegram's block
 PHONE = re.compile(r"^\+?\d[\d\s()-]{8,}$")
 
 STRANGER_CALL = """
@@ -37,8 +39,8 @@ STRANGER_TOOLS = [
     {"name": "hang_up", "description": "Положить трубку: когда попрощались или разговор закончен."},
 ]
 
-# The owner's message: (chat, text, images, spoken, file path)
-OwnerHandler = Callable[[UserChat, str, list[str] | None, bool, str | None], Awaitable[None]]
+# The owner's message: (chat, text, images, spoken, file path, parts of video and stickers for Gemini)
+OwnerHandler = Callable[..., Awaitable[None]]
 
 
 def make_client(cfg: Config) -> TelegramClient:
@@ -46,27 +48,6 @@ def make_client(cfg: Config) -> TelegramClient:
     return TelegramClient(cfg.tg_session, cfg.tg_api_id, cfg.tg_api_hash, device_model="Jarvis Server",
                           system_version="Ubuntu", app_version="3.0", lang_code="ru", system_lang_code="ru-RU",
                           connection_retries=-1, retry_delay=5)
-
-
-TRANSLIT = str.maketrans({"а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh", "з": "z",
-                          "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
-                          "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh",
-                          "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya"})
-
-
-def _name_words(text: str) -> list[str]:
-    """Latin letters, endings cut: «Сардору», «Sardor» and «сардор» all become «sardor»."""
-    latin = text.lower().translate(TRANSLIT).replace("kh", "h")
-    return [re.sub(r"(?<=\w{3})[aeiouy]+$", "", w) for w in re.findall(r"[a-z0-9]+", latin)]
-
-
-def name_matches(query: str, user) -> bool:
-    """Every word asked for is the start of one of the person's names (first, last, username)."""
-    wanted = _name_words(query)
-    have = _name_words(" ".join(p for p in (getattr(user, "first_name", None), getattr(user, "last_name", None),
-                                            getattr(user, "username", None)) if p))
-    # Short words must match whole: «Сар» should not quietly become Сардор
-    return bool(wanted) and all(any(h == w or (len(w) >= 4 and h.startswith(w)) for h in have) for w in wanted)
 
 
 def display(user) -> str:
@@ -168,22 +149,19 @@ class UserAccount:
             return  # part of an album: _on_album takes all of it at once
         if self.owner.answer(text):
             return
-        if m.sticker or m.gif:
-            return  # a reaction, not a request worth paying for
+        self.owner.last = m  # a reaction goes under this message
         if m.voice or m.audio or m.video_note:
             heard = await self._hear(m)
-            if not heard:
+            if heard:
+                await self.owner.say(f"🎙 {heard}", quiet=True)
+                await self.on_owner(self.owner, heard + (f"\n{text}" if text else ""), None, True, None)
+                return
+            if not m.video_note:
                 await self.owner.say("Не расслышал, повтори.")
                 return
-            await self.owner.say(f"🎙 {heard}", quiet=True)
-            await self.on_owner(self.owner, heard + (f"\n{text}" if text else ""), None, True, None)
-        elif m.photo:
-            data = await m.download_media(file=bytes)
-            name = f"photo_{m.id}.jpg"
-            with open(os.path.join(self.inbox, name), "wb") as f:
-                f.write(data)
-            await self.on_owner(self.owner, (text or "Что на фото?") + f"\n[фото сохранено в inbox как {name}]",
-                                [base64.b64encode(data).decode()], False, None)
+        if m.sticker or m.gif or m.video or m.video_note or m.photo or \
+                (m.document and (m.file.mime_type or "").startswith("image/")):
+            await self._look_at(m, text)
         elif m.document:
             if (m.file.size or 0) > MAX_FILE:
                 await self.owner.say("Файл больше 200 МБ, такие не принимаю.")
@@ -194,6 +172,22 @@ class UserAccount:
             await self.on_owner(self.owner, text, None, False, path)
         elif text:
             await self.on_owner(self.owner, text, None, False, None)
+
+    async def _look_at(self, m, text: str) -> None:
+        """A meme, sticker, GIF, video, circle or photo: Gemini looks, and answers like a person (or just reacts)."""
+        label, parts = await media.look(m, media.OWNER_MAX)
+        images, saved = None, ""
+        if m.photo and parts:  # photos also reach Claude's eyes and the inbox, for tasks like «отправь это Заке»
+            data = parts[0]["inlineData"]["data"]
+            name = f"photo_{m.id}.jpg"
+            with open(os.path.join(self.inbox, name), "wb") as f:
+                f.write(base64.b64decode(data))
+            images, parts, saved = [data], [], f"\n[фото сохранено в inbox как {name}]"
+        elif text and autonomy.looks_like_task(text) and (m.video or m.gif or m.video_note):
+            name = os.path.basename(m.file.name or f"video_{m.id}{m.file.ext or '.mp4'}")
+            await m.download_media(file=os.path.join(self.inbox, name))
+            saved = f"\n[видео сохранено в inbox как {name}]"
+        await self.on_owner(self.owner, f"{label} {text}".strip() + saved, images, False, None, parts or None)
 
     async def _on_album(self, event) -> None:
         """Several photos or files sent at once by the owner: one request with all of them."""
@@ -215,7 +209,7 @@ class UserAccount:
                     continue
                 names.append(name)
             if names:
-                text = (event.text or ("Что на фото?" if images else "Посмотри файлы.")) + \
+                text = (event.text or (f"[альбом: {len(images)} фото]" if images else "Посмотри файлы.")) + \
                        f"\n[сохранено в inbox: {', '.join(names)}]"
                 await self.on_owner(self.owner, text, images[:MAX_ALBUM_IMAGES] or None, False, None)
         except Exception:
@@ -223,13 +217,13 @@ class UserAccount:
 
     async def _from_stranger(self, event, sender) -> None:
         m, peer, name = event.message, event.sender_id, display(sender)
-        if not self.strangers.allowed(peer):
-            return  # over the caps: silence, and no note for the owner either
+        if self.strangers.memory.is_blocked(peer) or not self.strangers.allowed(peer):
+            return  # blocked, or over the caps: silence, and no note for the owner either
         if m.grouped_id:
             if m.grouped_id in self._albums_seen:
                 return  # one answer per album, not one per picture
             self._albums_seen.append(m.grouped_id)
-        text, spoken = m.raw_text or "", False
+        text, spoken, parts = m.raw_text or "", False, []
         if m.voice or m.video_note:
             if (m.file.duration or 0) > MAX_STRANGER_VOICE:
                 text = "[прислал длинное голосовое, больше двух минут]" + (f" {text}" if text else "")
@@ -239,28 +233,52 @@ class UserAccount:
                     return
                 text, spoken = heard + (f"\n{text}" if text else ""), True
         elif m.media:
-            text = "[прислал вложение]" + (f" {text}" if text else "")
+            label, parts = await media.look(m, media.STRANGER_MAX)
+            text = f"{label or '[прислал вложение]'} {text}".strip()
         if not text.strip():
             return
-        if self.strangers.is_new(peer) and self.tell_owner:
-            await self.tell_owner(f"👤 Мне впервые написал {name}:\n{text[:500]}")
+        fresh = self.strangers.is_new(peer)
         await self.client.send_read_acknowledge(peer, m)
         try:
             async with self.client.action(peer, "record-audio" if spoken else "typing"):
-                out = await self.strangers.reply(peer, name, text)
+                out = await self.strangers.reply(peer, name, text, parts)
         except GeminiError as e:
             log.warning("Gemini failed for %s: %s", peer, e)
             await self.client.send_message(peer, "Секунду, я сейчас перегружен. Напишите ещё раз чуть позже.")
             return
         if out is None:
             return
-        answer, note = out
-        if spoken:
-            await self._send_voice(peer, answer)
-        else:
-            await self.client.send_message(peer, answer, parse_mode=None, link_preview=False)
-        if note and self.tell_owner:
-            await self.tell_owner(f"📨 {name} просит передать:\n{note}")
+        if out.spam:
+            await self._spam(peer, name)
+            return
+        if fresh and self.tell_owner:
+            await self.tell_owner(f"👤 Мне впервые написал {name}:\n{text[:500]}")
+        if out.reaction:
+            await react(self.client, m, out.reaction)
+        if out.answer and spoken:
+            await self._send_voice(peer, out.answer)
+        elif out.answer:
+            await self.client.send_message(peer, out.answer, parse_mode=None, link_preview=False)
+        if out.note and self.tell_owner:
+            await self.tell_owner(f"📨 {name} просит передать:\n{out.note}")
+
+    async def _spam(self, peer: int, name: str) -> None:
+        """Junk gets no answer and no note; the third piece from one stranger means a Telegram block."""
+        from telethon.errors import RPCError
+        from telethon.tl.functions.contacts import BlockRequest
+
+        memory = self.strangers.memory
+        hits = memory.spam_hit(peer)
+        log.info("spam from %s (%d)", name, hits)
+        if hits < SPAM_BLOCK_AFTER:
+            return
+        try:
+            await self.client(BlockRequest(await self.client.get_input_entity(peer)))
+        except (RPCError, ValueError):
+            log.warning("could not block %s in Telegram, ignoring them instead", name)
+        memory.block(peer)
+        if self.tell_owner:
+            await self.tell_owner(f"🚫 Заблокировал спамера {name}.")
 
     async def _hear(self, m) -> str:
         """Gemini understands speech best; Whisper on the server's CPU is the fallback."""
@@ -381,7 +399,8 @@ class UserAccount:
             if not self.owner_persona:
                 return None
             return self.owner_persona("Пользователь позвонил тебе. Поздоровайся одним-двумя словами, например «Слушаю».")
-        if peer == SERVICE or not self.strangers.ready or not self.strangers.allowed(peer):
+        if peer == SERVICE or not self.strangers.ready or not self.strangers.allowed(peer) \
+                or self.strangers.memory.is_blocked(peer):
             return None
 
         async def run_tool(name: str, args: dict) -> str:

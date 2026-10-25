@@ -1,7 +1,10 @@
 import json
+import logging
 import os
 import sqlite3
 import time
+
+log = logging.getLogger("jarvis.memory")
 
 
 class Memory:
@@ -26,8 +29,16 @@ class Memory:
             CREATE TABLE IF NOT EXISTS peers (
                 id INTEGER PRIMARY KEY, ts REAL, peer INTEGER, name TEXT, role TEXT, content TEXT);
             CREATE INDEX IF NOT EXISTS peers_by_peer ON peers (peer, id);
+            CREATE TABLE IF NOT EXISTS summary (id INTEGER PRIMARY KEY, upto INTEGER, text TEXT);
+            CREATE TABLE IF NOT EXISTS slang (word TEXT PRIMARY KEY, meaning TEXT, ts REAL);
+            CREATE TABLE IF NOT EXISTS spam (peer INTEGER PRIMARY KEY, hits INTEGER, ts REAL, blocked INTEGER DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
             """
         )
+        try:  # reminders that ring the owner instead of writing to him
+            self.db.execute("ALTER TABLE reminders ADD COLUMN call INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # the column is already there
 
     def add(self, role: str, content: str) -> None:
         self.db.execute(
@@ -48,7 +59,29 @@ class Memory:
 
     def clear(self) -> None:
         self.db.execute("DELETE FROM messages")
+        self.db.execute("DELETE FROM summary")
         self.db.commit()
+
+    # Older talk is folded into one rolling summary, so the window can stay small and nothing is forgotten
+    def window_start(self, limit: int) -> int:
+        """Id of the oldest message among the last `limit`; everything before it is outside the window."""
+        row = self.db.execute("SELECT MIN(id) FROM (SELECT id FROM messages ORDER BY id DESC LIMIT ?)",
+                              (limit,)).fetchone()
+        return row[0] or 0
+
+    def summary(self) -> tuple[int, str]:
+        row = self.db.execute("SELECT upto, text FROM summary WHERE id = 1").fetchone()
+        return (row[0], row[1]) if row else (0, "")
+
+    def set_summary(self, upto: int, text: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO summary (id, upto, text) VALUES (1, ?, ?)", (upto, text))
+        self.db.commit()
+
+    def unsummarized(self, before_id: int, limit: int) -> list[tuple[int, str, str]]:
+        """Messages that are neither in the summary nor in the window: (id, role, text), oldest first."""
+        upto, _ = self.summary()
+        return self.db.execute("SELECT id, role, content FROM messages WHERE id > ? AND id < ? ORDER BY id LIMIT ?",
+                               (upto, before_id, limit)).fetchall()
 
     def log_usage(self, model: str, tokens_in: int, tokens_out: int, cost: float) -> None:
         self.db.execute(
@@ -75,20 +108,19 @@ class Memory:
     def facts(self) -> list[tuple[int, str]]:
         return self.db.execute("SELECT id, text FROM facts ORDER BY id").fetchall()
 
-    def add_reminder(self, due: float, text: str) -> int:
-        cur = self.db.execute("INSERT INTO reminders (due, text) VALUES (?, ?)", (due, text))
+    def add_reminder(self, due: float, text: str, call: bool = False) -> int:
+        cur = self.db.execute("INSERT INTO reminders (due, text, call) VALUES (?, ?, ?)", (due, text, int(call)))
         self.db.commit()
         return cur.lastrowid
 
-    def due_reminders(self) -> list[tuple[int, str]]:
-        return self.db.execute(
-            "SELECT id, text FROM reminders WHERE done = 0 AND due <= ?", (time.time(),)
-        ).fetchall()
+    def due_reminders(self) -> list[tuple[int, str, bool]]:
+        rows = self.db.execute(
+            "SELECT id, text, call FROM reminders WHERE done = 0 AND due <= ?", (time.time(),)).fetchall()
+        return [(i, text, bool(call)) for i, text, call in rows]
 
-    def pending_reminders(self) -> list[tuple[int, float, str]]:
-        return self.db.execute(
-            "SELECT id, due, text FROM reminders WHERE done = 0 ORDER BY due"
-        ).fetchall()
+    def pending_reminders(self) -> list[tuple[int, float, str, bool]]:
+        rows = self.db.execute("SELECT id, due, text, call FROM reminders WHERE done = 0 ORDER BY due").fetchall()
+        return [(i, due, text, bool(call)) for i, due, text, call in rows]
 
     def finish_reminder(self, reminder_id: int) -> bool:
         cur = self.db.execute("UPDATE reminders SET done = 1 WHERE id = ? AND done = 0", (reminder_id,))
@@ -100,6 +132,7 @@ class Memory:
         cur = self.db.execute("INSERT INTO watchers (ts, spec, state, due) VALUES (?, ?, '{}', ?)",
                               (time.time(), json.dumps(spec, ensure_ascii=False), due))
         self.db.commit()
+        log.info("watcher %s added, first check in %d s: %s", cur.lastrowid, due - time.time(), spec)
         return cur.lastrowid
 
     def watchers(self) -> list[tuple[int, dict, dict, float]]:
@@ -114,6 +147,7 @@ class Memory:
     def remove_watcher(self, watcher_id: int) -> bool:
         cur = self.db.execute("DELETE FROM watchers WHERE id = ?", (watcher_id,))
         self.db.commit()
+        log.info("watcher %s removed (%s)", watcher_id, "was there" if cur.rowcount else "not found")
         return cur.rowcount > 0
 
     # SMS and calls cost rubles, counted apart from the AI spend
@@ -149,3 +183,42 @@ class Memory:
         return self.db.execute(
             "SELECT peer, MAX(name), MAX(ts), COUNT(*) FROM peers GROUP BY peer ORDER BY MAX(ts) DESC LIMIT ?",
             (limit,)).fetchall()
+
+    # Today's slang that Jarvis learned: (word, meaning), newest last
+    def learn_slang(self, word: str, meaning: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO slang (word, meaning, ts) VALUES (?, ?, ?)",
+                        (word.strip().lower(), meaning.strip(), time.time()))
+        self.db.commit()
+
+    def slang_words(self, limit: int) -> list[tuple[str, str]]:
+        rows = self.db.execute("SELECT word, meaning FROM slang ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+        return rows[::-1]
+
+    # Strangers who only send junk: counted, then blocked
+    def spam_hit(self, peer: int) -> int:
+        self.db.execute("INSERT INTO spam (peer, hits, ts) VALUES (?, 1, ?) "
+                        "ON CONFLICT(peer) DO UPDATE SET hits = hits + 1, ts = excluded.ts", (peer, time.time()))
+        self.db.commit()
+        return self.db.execute("SELECT hits FROM spam WHERE peer = ?", (peer,)).fetchone()[0]
+
+    def block(self, peer: int) -> None:
+        self.db.execute("INSERT INTO spam (peer, hits, ts, blocked) VALUES (?, 0, ?, 1) "
+                        "ON CONFLICT(peer) DO UPDATE SET blocked = 1", (peer, time.time()))
+        self.db.commit()
+
+    def is_blocked(self, peer: int) -> bool:
+        row = self.db.execute("SELECT blocked FROM spam WHERE peer = ?", (peer,)).fetchone()
+        return bool(row and row[0])
+
+    def drop_last_peer(self, peer: int) -> None:
+        """Forget the stranger's last message: junk must not sit in the context of a real conversation."""
+        self.db.execute("DELETE FROM peers WHERE id = (SELECT MAX(id) FROM peers WHERE peer = ?)", (peer,))
+        self.db.commit()
+
+    def meta_get(self, key: str, default: str = "") -> str:
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def meta_set(self, key: str, value: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+        self.db.commit()

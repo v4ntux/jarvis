@@ -1,7 +1,9 @@
 import asyncio
 import base64
+import datetime as dt
 import logging
 import os
+import time
 import uuid
 
 import anthropic
@@ -10,7 +12,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from . import calls, config, phone, tg_user, voice, watchers
+from . import calls, config, intents, phone, style, tg_user, voice, watchers, web
 from .brain import INBOX, Brain, Session
 from .front import Front
 from .gemini import Gemini, Strangers
@@ -25,7 +27,8 @@ BUSY = "Я ещё занят прошлой задачей. /stop — прерв
 CALL_MARK = "[голосом в звонке] "
 CALL_WORK_SECONDS = 90
 HELP = ("Джарвис на связи. Пиши текстом или голосом, присылай фото и файлы, звони в Telegram.\n"
-        "Работаю на сервере 24/7, ноутбук нужен только для дел на нём.\n"
+        "Работаю на сервере 24/7, ноутбук нужен только для дел на нём. Команды не нужны: просто говори, "
+        "например «позвони через 5 минут» или «стоп».\n"
         "/stop прервать · /status ноутбук и Telegram · /cost расход · /memory что помню · "
         "/watchers наблюдатели (/unwatch 3 — удалить) · /calltest позвонить в Telegram · /phonetest проверить SMS "
         "(/phonetest call — звонок робота) · /voice голосовые ответы вкл/выкл · /reset забыть разговор")
@@ -33,6 +36,8 @@ HELP = ("Джарвис на связи. Пиши текстом или голо
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for noisy in ("primp", "httpcore", "aiohttp.access"):  # one line per search-engine request drowns the real log
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     cfg = config.load()
     os.makedirs(INBOX, exist_ok=True)
     memory = Memory(cfg.db_path)
@@ -85,7 +90,7 @@ async def main() -> None:
         return bool(state["task"] and not state["task"].done())
 
     async def run_brain(chat, text: str, images: list[str] | None = None, wait: float = 0,
-                        direct: bool = False) -> str | None:
+                        direct: bool = False, media: list[dict] | None = None) -> str | None:
         """One request: free Gemini first, the Claude brain for real work (direct: the brain at once).
         Progress and confirmations go to this chat.
 
@@ -99,7 +104,8 @@ async def main() -> None:
         if busy():
             return None
         session = make_session(chat)
-        state["task"] = asyncio.create_task((brain if direct else front).reply(text, session, images))
+        request = brain.reply(text, session, images) if direct else front.reply(text, session, images, media)
+        state["task"] = asyncio.create_task(request)
         await chat.typing()
         try:
             answer = await state["task"]
@@ -114,6 +120,7 @@ async def main() -> None:
             answer = f"Ошибка мозга: {type(e).__name__}: {e}"[:500]
         finally:
             state["task"] = None
+            front.compact_later()
             if session.status["msg"]:
                 await chat.delete(session.status["msg"])
         return answer
@@ -133,14 +140,49 @@ async def main() -> None:
             if path and os.path.exists(path):
                 os.unlink(path)
 
-    async def respond(chat, text: str, images: list[str] | None = None, spoken: bool = False) -> None:
-        answer = await run_brain(chat, text, images)
+    async def ring(text: str) -> None:
+        """A call the owner asked for: ring in Telegram, and if he does not pick up leave it in the chat."""
+        picked = bool(account.ready and account.calls and await account.call_owner(text))
+        if not picked:
+            await owner_chat().say(f"📞 Звонил, ты не взял. {text}")
+
+    async def run_intent(chat, text: str) -> bool:
+        """Plain words that need no model at all: «стоп», «позвони мне», «позвони через две минуты»."""
+        now = dt.datetime.now(config.TZ)
+        intent = intents.parse(text, now)
+        if intent is None:
+            return False
+        if intent.kind == "stop":
+            return stop_task()  # nothing to stop: the word goes to the chat like any other
+        if not (account.ready and account.calls):
+            answer = "Позвонить в Telegram не могу: звонки сейчас не работают (/status покажет почему)."
+        elif intent.at is None or intent.at - time.time() < 5:
+            spawn(ring("Ты просил позвонить."))
+            answer = "Звоню."
+        else:
+            memory.add_reminder(intent.at, "Ты просил позвонить.", call=True)
+            when = dt.datetime.fromtimestamp(intent.at, config.TZ)
+            answer = f"Окей, наберу в {when:%H:%M}" + (f" ({when:%d.%m})" if when.date() != now.date() else "") + "."
+        memory.add("user", text)
+        memory.add("assistant", answer)
+        await chat.say(answer)
+        return True
+
+    async def respond(chat, text: str, images: list[str] | None = None, spoken: bool = False,
+                      media: list[dict] | None = None) -> None:
+        if not images and not media and await run_intent(chat, text):
+            return
+        answer = await run_brain(chat, text, images, media=media)
         if answer is None:
             await chat.say(BUSY)
             return
-        await send_long(chat, answer)
-        if spoken and state["voice_replies"]:
-            await send_voice(chat, answer)
+        answer, emoji = style.split_reaction(answer)
+        if emoji:
+            await chat.react(emoji)  # like a person's like under his message
+        if answer:
+            await send_long(chat, answer)
+            if spoken and state["voice_replies"]:
+                await send_voice(chat, answer)
 
     async def ask_from_laptop(text: str) -> str:
         """The laptop's voice or panel asks; the laptop speaks the answer, Telegram keeps a quiet copy."""
@@ -267,7 +309,7 @@ async def main() -> None:
 
     async def cmd_cost(_: str) -> str:
         used, rub = memory.phone_since(config.day_start())
-        return (f"Claude сегодня: ${brain.spent_today():.4f} из ${cfg.daily_limit:.2f} (обнуляется в полночь по Москве)\n"
+        return (f"Claude сегодня: ${brain.spent_today():.4f} из ${cfg.daily_limit:.2f} (обнуляется в твою полночь)\n"
                 "Разговор, поиск, напоминания и звонки идут через Gemini: бесплатно. Claude — только для работы "
                 "на ноутбуке и сервере или по слову «подумай».\n"
                 f"Всего: ${memory.spent_since(0):.4f}\n"
@@ -325,14 +367,14 @@ async def main() -> None:
         return commands.get(words[0].split("@")[0].lower()) if words else None
 
     async def handle_owner(chat, text: str, images: list[str] | None = None, spoken: bool = False,
-                           path: str | None = None) -> None:
-        """An owner message from Jarvis's own account: a command, a file or a request for the brain."""
+                           path: str | None = None, media: list[dict] | None = None) -> None:
+        """An owner message from Jarvis's own account: a command, a file, a meme or a request."""
         if path:
             text, images = file_request(path, text)
         elif command := command_of(text):
             await send_long(chat, await command(text))
             return
-        await respond(chat, text, images, spoken)
+        await respond(chat, text, images, spoken, media)
 
     @dp.callback_query(F.data.regexp(r"^(ok|no):"))
     async def on_confirm(q: CallbackQuery) -> None:
@@ -408,13 +450,27 @@ async def main() -> None:
 
     async def reminders_loop() -> None:
         while True:
-            for rid, text in memory.due_reminders():
+            for rid, text, call in memory.due_reminders():
                 if memory.finish_reminder(rid):
                     try:
-                        await owner_chat().say(f"⏰ Напоминание: {text}")
+                        if call:
+                            spawn(ring(text))
+                        else:
+                            await owner_chat().say(f"⏰ Напоминание: {text}")
                     except Exception:
                         log.exception("reminder %s failed", rid)
-            await asyncio.sleep(20)
+            await asyncio.sleep(10)
+
+    async def slang_loop() -> None:
+        """Once a week Jarvis reads up on what is trending, so he keeps up with the slang and the memes."""
+        await asyncio.sleep(90)
+        while True:
+            try:
+                if gemini.ready and style.refresh_due(memory):
+                    await style.refresh(gemini, memory, web.search)
+            except Exception:
+                log.exception("slang refresh failed")
+            await asyncio.sleep(6 * 3600)
 
     async def laptop_notice(text: str) -> None:
         await send_long(owner_chat(), "💻 " + text)
@@ -422,10 +478,11 @@ async def main() -> None:
     async def tell_owner(text: str) -> None:
         await send_long(owner_chat(), text)
 
-    asyncio.create_task(reminders_loop())
+    spawn(reminders_loop())  # references are kept: asyncio drops tasks nobody holds
+    spawn(slang_loop())
     brain.notify, brain.tg = on_event, account
     hub.on_ask, hub.on_stop, hub.on_notice = ask_from_laptop, stop_task, laptop_notice
-    asyncio.create_task(watchers.Watchers(memory, hub, on_event).loop())
+    spawn(watchers.Watchers(memory, hub, on_event).loop())
     account.on_owner, account.owner_persona = handle_owner, owner_persona
     account.tell_owner, account.on_owner_seen = tell_owner, owner_seen
     try:
