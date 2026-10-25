@@ -86,6 +86,9 @@ class BotChat:
     async def react(self, emoji: str) -> None:
         pass  # the bot has no message to put it under
 
+    async def express(self, marks) -> None:
+        pass  # nor stickers and GIFs of his own
+
     async def confirm(self, question: str) -> bool:
         key = uuid.uuid4().hex[:12]
         fut = asyncio.get_running_loop().create_future()
@@ -142,6 +145,9 @@ class LogChat:
     async def react(self, emoji: str) -> None:
         pass
 
+    async def express(self, marks) -> None:
+        pass
+
     async def confirm(self, question: str) -> bool:
         return False
 
@@ -153,10 +159,20 @@ class UserChat:
         self.client, self.peer = client, peer
         self.pending: asyncio.Future | None = None
         self.last = None  # the owner's newest message: what a reaction goes under
+        self.taste = None  # Jarvis's own stickers and GIFs, set once the account is up
 
     async def react(self, emoji: str) -> None:
         if self.last is not None:
             await react(self.client, self.last, emoji)
+
+    async def express(self, marks) -> None:
+        """A sticker or GIF of his own, and a keepsake of the GIF or sticker the owner just sent."""
+        if self.taste is None:
+            return
+        if marks.sticker or marks.gif:
+            await self.taste.express(self.peer, marks.sticker, marks.gif)
+        if marks.love and self.last is not None:
+            await self.taste.love(self.last, marks.love)
 
     async def say(self, text: str, quiet: bool = False):
         return await self.client.send_message(self.peer, text, link_preview=False, silent=quiet, parse_mode=None)

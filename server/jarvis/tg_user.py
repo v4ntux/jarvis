@@ -4,20 +4,24 @@ The owner talks to Jarvis here (free Gemini first, the Claude brain for real wor
 else talks to Gemini alone and never reaches the brain, the tools, the laptop or anything
 Jarvis knows about the owner. Calls go through Gemini Live. Groups, channels and bots are ignored.
 """
+import asyncio
 import base64
 import collections
 import io
 import logging
 import os
 import re
+import time
 from typing import Awaitable, Callable
 
 from telethon import TelegramClient, events
 
-from . import autonomy, calls, media, voice
+from . import autonomy, calls, media, style, voice
 from .config import Config
 from .gemini import Gemini, GeminiError, Strangers
+from .groups import RECENT_MEDIA_SECONDS, Groups
 from .names import name_matches
+from .taste import Taste
 from .transport import IMAGE_EXT, UserChat, react
 
 log = logging.getLogger("jarvis.tg")
@@ -75,6 +79,10 @@ class UserAccount:
         self.on_owner_seen: Callable[[], None] | None = None
         self.call_notes: dict[int, list[str]] = {}
         self._albums_seen: collections.deque = collections.deque(maxlen=200)
+        self.groups = Groups(cfg, strangers.memory, gemini)  # how he behaves in group chats
+        self.taste: Taste | None = None  # his own stickers and GIFs, once the account is up
+        self.me_id = 0
+        self._background: set[asyncio.Task] = set()
 
     async def start(self) -> bool:
         if not self.cfg.tg_api_id or not self.cfg.tg_api_hash:
@@ -86,7 +94,9 @@ class UserAccount:
             await self.client.disconnect()
             return False
         me = await self.client.get_me()
+        self.me_id = self.groups.me_id = me.id
         self.owner = UserChat(self.client, self.cfg.owner_id)
+        self.taste = self.owner.taste = Taste(self.client, self.strangers.memory)
         self.client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
         self.client.add_event_handler(self._on_album, events.Album())
         if not await self._reach_owner():
@@ -100,6 +110,9 @@ class UserAccount:
                 log.exception("calls are off")
                 self.calls = None
         self.ready = True
+        task = asyncio.create_task(self.taste.warm())  # sticker packs are looked up in the background
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
         log.info("own account %s is up, calls %s, Gemini %s", display(me), "on" if self.calls else "off",
                  "on" if self.gemini.ready else "off")
         return True
@@ -128,10 +141,12 @@ class UserAccount:
 
     async def _on_message(self, event) -> None:
         # Who is who comes from Telegram's sender id, which nobody can fake; message text never decides it
-        if not event.is_private:
-            return
         try:
-            if event.sender_id == self.cfg.owner_id:
+            if event.is_group:
+                await self._from_group(event)
+            elif not event.is_private:
+                return  # channels
+            elif event.sender_id == self.cfg.owner_id:
                 await self._from_owner(event)
             elif event.sender_id != SERVICE:
                 sender = await event.get_sender()
@@ -259,6 +274,7 @@ class UserAccount:
             await self._send_voice(peer, out.answer)
         elif out.answer:
             await self.client.send_message(peer, out.answer, parse_mode=None, link_preview=False)
+        await self._express(peer, out, m)
         if out.note and self.tell_owner:
             await self.tell_owner(f"📨 {name} просит передать:\n{out.note}")
 
@@ -279,6 +295,119 @@ class UserAccount:
         memory.block(peer)
         if self.tell_owner:
             await self.tell_owner(f"🚫 Заблокировал спамера {name}.")
+
+    async def _express(self, chat: int, said, msg=None, reply_to: int | None = None) -> None:
+        """The sticker or GIF he wanted to send along, and the keepsake from what he was just shown."""
+        if self.taste is None:
+            return
+        if said.sticker or said.gif:
+            await self.taste.express(chat, said.sticker, said.gif, reply_to)
+        if said.love and msg is not None:
+            await self.taste.love(msg, said.love)
+
+    # Groups: a member with a character. No tools, no Claude, nothing about the owner: only a personality.
+
+    async def _from_group(self, event) -> None:
+        from telethon.tl.types import User
+
+        m, chat = event.message, event.chat_id
+        sender = await event.get_sender()
+        if not isinstance(sender, User) or sender.bot or sender.id in (self.me_id, SERVICE):
+            return  # other bots would talk with him forever
+        name = sender.first_name or sender.username or "кто-то"
+        owner = sender.id == self.cfg.owner_id
+        who = f"{name} (хозяин)" if owner else name
+        title = getattr(await event.get_chat(), "title", None) or "группа"
+        memory = self.strangers.memory
+        if memory.group_seen(chat, title) and self.tell_owner:
+            await self.tell_owner(f"👥 Теперь я в группе «{title}». /groups — управление.")
+        text, tag = m.raw_text or "", media.label(m)
+        memory.group_add(chat, m.id, sender.id, name, f"{tag} {text}".strip(), media=bool(tag))
+        mode = memory.group_mode(chat)
+        if mode == "off" or not self.gemini or not self.gemini.ready:
+            return
+        addressed = self.groups.addressed(text, bool(m.mentioned), await self._replied_to_me(m))
+        switch = self.groups.owner_switch(text) if addressed and owner else None
+        if switch:  # «Джарвис, тихо» from the owner, right in the group
+            memory.set_group_mode(chat, switch)
+            await react(self.client, m, "🫡" if switch == "quiet" else "🔥")
+        elif addressed:
+            await self._group_reply(m, chat, title, who, text, tag, spontaneous=False)
+        elif mode == "on" and self.groups.spontaneous_wanted(bool(tag), text):
+            await self._group_reply(m, chat, title, who, text, tag, spontaneous=True)
+
+    async def _replied_to_me(self, m) -> bool:
+        if not getattr(m, "is_reply", False):
+            return False
+        try:
+            replied = await m.get_reply_message()
+        except Exception:
+            return False
+        return bool(replied and replied.sender_id == self.me_id)
+
+    async def _group_reply(self, m, chat: int, title: str, who: str, text: str, tag: str, spontaneous: bool) -> None:
+        if not self.groups.may_speak(chat, spontaneous):
+            return
+        parts, seen = await self._group_media(m, chat, text, tag, look=bool(tag) or not spontaneous)
+        ask = self.groups.glance if spontaneous else self.groups.answer
+        try:
+            async with self.client.action(chat, "typing"):
+                verdict = await ask(chat, title, who, text or tag, seen, parts)
+        except GeminiError as e:
+            log.warning("Gemini failed in group %s: %s", title, e)
+            return  # in a group he stays silent rather than say he is overloaded
+        await self._group_say(m, chat, title, verdict, spontaneous)
+
+    async def _group_media(self, m, chat: int, text: str, tag: str, look: bool) -> tuple[list[dict], str]:
+        """What he can see: the message's own picture or video, the one it answers, or (for «смотри») the latest."""
+        if not look:
+            return [], ""
+        shown = [m] if tag else []
+        if not shown and getattr(m, "is_reply", False):
+            try:
+                replied = await m.get_reply_message()
+            except Exception:
+                replied = None
+            if replied is not None and media.label(replied):
+                shown.append(replied)
+        if not shown and self.groups.wants_a_look(text):
+            recent = self.strangers.memory.group_media_since(chat, time.time() - RECENT_MEDIA_SECONDS)
+            found = await self.client.get_messages(chat, ids=recent) if recent else None
+            if found is not None:
+                shown.append(found)
+        parts, labels = [], []
+        for item in shown[:2]:
+            words, got = await media.look(item, media.STRANGER_MAX)
+            labels.append(words)
+            parts += got
+        return parts, ", ".join(label for label in labels if label)
+
+    async def _group_say(self, m, chat: int, title: str, verdict, spontaneous: bool) -> None:
+        from telethon.errors import (ChatAdminRequiredError, ChatWriteForbiddenError, FloodWaitError, RPCError,
+                                     SlowModeWaitError, UserBannedInChannelError)
+
+        if not verdict:
+            return
+        sent_id = None
+        try:
+            if verdict.reaction and not (verdict.sticker or verdict.gif):  # a person does not do all three at once
+                await react(self.client, m, verdict.reaction)
+            if verdict.answer:
+                sent_id = (await self.client.send_message(chat, verdict.answer, reply_to=m.id, parse_mode=None,
+                                                          link_preview=False)).id
+            await self._express(chat, verdict, m, reply_to=m.id)
+        except (FloodWaitError, SlowModeWaitError) as e:
+            self.groups.mute_for(chat, e.seconds + 5)
+            return
+        except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError):
+            self.groups.mute_for(chat, 6 * 3600)
+            if self.tell_owner:
+                await self.tell_owner(f"🔇 В группе «{title}» мне запретили писать.")
+            return
+        except RPCError as e:
+            log.warning("group %s: %s", title, e)
+            return
+        self.groups.record(chat, sent_id, verdict.answer or style.describe_marks(verdict) or "…", spontaneous)
 
     async def _hear(self, m) -> str:
         """Gemini understands speech best; Whisper on the server's CPU is the fallback."""

@@ -6,6 +6,7 @@ that costs money. If Gemini is down, or answers a task with a question or an exc
 import asyncio
 import datetime as dt
 import logging
+import random
 import re
 
 from . import archive, autonomy, style
@@ -74,6 +75,7 @@ class Front:
         self.tools = [declaration(t) for t in TOOLS if t["name"] in FREE_TOOLS] + [DELEGATE]
         self._compacting = False
         self._background: set[asyncio.Task] = set()
+        self.rng = random.Random()
 
     def system(self, call: bool = False) -> str:
         text = SYSTEM + "\n\n" + style.block(self.memory)
@@ -103,7 +105,11 @@ class Front:
             return await self.brain.reply(text, session, images)
         history = [{"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]}
                    for m in self.memory.recent(self.cfg.front_history) if isinstance(m["content"], str)]
-        asked = [{"text": text}] + [{"inlineData": {"mimeType": _media_type(b), "data": b}} for b in images or []]
+        asked = [{"text": text}]
+        urge = "" if autonomy.looks_like_task(text) else style.impulse(self.rng, self.cfg.extra_chance)
+        if urge:
+            asked.append({"text": urge})  # small talk now and then gets the urge to send a sticker or a GIF
+        asked += [{"inlineData": {"mimeType": _media_type(b), "data": b}} for b in images or []]
         contents = _alternate(history + [{"role": "user", "parts": asked + (media or [])}])
         done: list[str] = []
         try:
@@ -131,7 +137,8 @@ class Front:
                     session, images, task=True)
             if not calls:
                 answer = said or "Готово."
-                plain = style.split_reaction(answer)[0] or "(реакция)"
+                marks = style.split_marks(answer)
+                plain = marks.text or style.describe_marks(marks) or "…"
                 self.memory.add("user", text)
                 self.memory.add("assistant", plain + (f"\n[действия: {', '.join(done)}]" if done else ""))
                 return answer

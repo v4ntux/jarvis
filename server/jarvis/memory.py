@@ -33,6 +33,13 @@ class Memory:
             CREATE TABLE IF NOT EXISTS slang (word TEXT PRIMARY KEY, meaning TEXT, ts REAL);
             CREATE TABLE IF NOT EXISTS spam (peer INTEGER PRIMARY KEY, hits INTEGER, ts REAL, blocked INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS groups (chat INTEGER PRIMARY KEY, title TEXT, mode TEXT DEFAULT 'on', ts REAL);
+            CREATE TABLE IF NOT EXISTS group_log (
+                id INTEGER PRIMARY KEY, chat INTEGER, msg INTEGER, ts REAL, sender INTEGER, name TEXT, text TEXT,
+                media INTEGER DEFAULT 0, kind TEXT DEFAULT '');
+            CREATE UNIQUE INDEX IF NOT EXISTS group_log_msg ON group_log (chat, msg);
+            CREATE TABLE IF NOT EXISTS faves (id INTEGER PRIMARY KEY, kind TEXT, doc INTEGER, desc TEXT, ts REAL);
+            CREATE UNIQUE INDEX IF NOT EXISTS faves_doc ON faves (kind, doc);
             """
         )
         try:  # reminders that ring the owner instead of writing to him
@@ -222,3 +229,80 @@ class Memory:
     def meta_set(self, key: str, value: str) -> None:
         self.db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
         self.db.commit()
+
+    # Group chats: where Jarvis may talk, what was said lately, how much he already said himself
+    GROUP_LOG_KEEP = 300  # other people's messages kept per group; Jarvis's own rows stay for the daily counts
+
+    def group_seen(self, chat: int, title: str) -> bool:
+        """Registers the group (and its current title); True when Jarvis had not met it before."""
+        cur = self.db.execute("INSERT OR IGNORE INTO groups (chat, title, ts) VALUES (?, ?, ?)",
+                              (chat, title, time.time()))
+        if not cur.rowcount:
+            self.db.execute("UPDATE groups SET title = ? WHERE chat = ?", (title, chat))
+        self.db.commit()
+        return bool(cur.rowcount)
+
+    def group_mode(self, chat: int) -> str:
+        row = self.db.execute("SELECT mode FROM groups WHERE chat = ?", (chat,)).fetchone()
+        return row[0] if row else "on"
+
+    def set_group_mode(self, chat: int, mode: str) -> None:
+        self.db.execute("UPDATE groups SET mode = ? WHERE chat = ?", (mode, chat))
+        self.db.commit()
+
+    def groups(self) -> list[tuple[int, str, str]]:
+        return self.db.execute("SELECT chat, title, mode FROM groups ORDER BY ts").fetchall()
+
+    def group_add(self, chat: int, msg: int, sender: int, name: str, text: str, media: bool = False,
+                  kind: str = "") -> None:
+        """kind is '' for what people said, 'reply' / 'spont' for what Jarvis said (answered / on his own)."""
+        self.db.execute("INSERT OR IGNORE INTO group_log (chat, msg, ts, sender, name, text, media, kind) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (chat, msg, time.time(), sender, name, text, int(media), kind))
+        self.db.execute("DELETE FROM group_log WHERE chat = ? AND kind = '' AND id <= "
+                        "(SELECT id FROM group_log WHERE chat = ? AND kind = '' ORDER BY id DESC LIMIT 1 OFFSET ?)",
+                        (chat, chat, self.GROUP_LOG_KEEP))
+        self.db.commit()
+
+    def group_recent(self, chat: int, limit: int) -> list[tuple[int, str, str]]:
+        """The last messages of the group, oldest first: (sender, name, text). Reactions are not messages."""
+        rows = self.db.execute("SELECT sender, name, text FROM group_log WHERE chat = ? AND msg > 0 "
+                               "ORDER BY id DESC LIMIT ?", (chat, limit)).fetchall()
+        return rows[::-1]
+
+    def group_media_since(self, chat: int, ts: float) -> int | None:
+        """Id of the newest picture, sticker or video that people (not Jarvis) posted since ts."""
+        row = self.db.execute("SELECT msg FROM group_log WHERE chat = ? AND media = 1 AND kind = '' AND ts >= ? "
+                              "AND msg > 0 ORDER BY id DESC LIMIT 1", (chat, ts)).fetchone()
+        return row[0] if row else None
+
+    def group_count(self, chat: int | None, since: float, kinds: tuple[str, ...] = ("reply", "spont")) -> int:
+        """How many times Jarvis spoke or reacted since ts, in one group or (chat None) in all of them."""
+        marks = ",".join("?" * len(kinds))
+        if chat is None:
+            row = self.db.execute(f"SELECT COUNT(*) FROM group_log WHERE kind IN ({marks}) AND ts >= ?",
+                                  (*kinds, since)).fetchone()
+        else:
+            row = self.db.execute(f"SELECT COUNT(*) FROM group_log WHERE chat = ? AND kind IN ({marks}) AND ts >= ?",
+                                  (chat, *kinds, since)).fetchone()
+        return row[0]
+
+    # Jarvis's own taste: GIFs he liked enough to keep (the file itself lives in Telegram's saved GIFs)
+    FAVES_KEEP = 60
+
+    def fave_add(self, kind: str, doc: int, desc: str) -> int:
+        self.db.execute("INSERT OR REPLACE INTO faves (kind, doc, desc, ts) VALUES (?, ?, ?, ?)",
+                        (kind, doc, desc.strip(), time.time()))
+        self.db.execute("DELETE FROM faves WHERE kind = ? AND id NOT IN "
+                        "(SELECT id FROM faves WHERE kind = ? ORDER BY ts DESC LIMIT ?)", (kind, kind, self.FAVES_KEEP))
+        self.db.commit()
+        return self.db.execute("SELECT id FROM faves WHERE kind = ? AND doc = ?", (kind, doc)).fetchone()[0]
+
+    def faves(self, kind: str, limit: int) -> list[tuple[int, str]]:
+        """Newest last: (number to refer to it by, description)."""
+        rows = self.db.execute("SELECT id, desc FROM faves WHERE kind = ? ORDER BY ts DESC LIMIT ?",
+                               (kind, limit)).fetchall()
+        return rows[::-1]
+
+    def fave_doc(self, fave_id: int) -> int | None:
+        row = self.db.execute("SELECT doc FROM faves WHERE id = ?", (fave_id,)).fetchone()
+        return row[0] if row else None

@@ -5,6 +5,7 @@ only this one person's own conversation. Anything they want passed on comes back
 """
 import base64
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -57,6 +58,9 @@ class Reply:
     note: str = ""  # what to pass on to the owner
     reaction: str = ""  # an emoji to put under their message
     spam: bool = False
+    sticker: str = ""  # an emoji: a sticker to send
+    gif: str = ""  # «#12» (a favorite) or a search query
+    love: str = ""  # he keeps the GIF or sticker he was just shown, for this reason
 
 
 def split_note(text: str) -> tuple[str, str]:
@@ -158,6 +162,7 @@ class Gemini:
 class Strangers:
     def __init__(self, cfg: Config, memory: Memory, gemini: Gemini):
         self.cfg, self.memory, self.gemini = cfg, memory, gemini
+        self.rng = random.Random()
 
     @property
     def ready(self) -> bool:
@@ -182,13 +187,16 @@ class Strangers:
             return None
         self.memory.add_peer(peer, name, "user", text[:MAX_IN])
         contents = to_contents(self.memory.peer_history(peer, HISTORY))
+        urge = style.impulse(self.rng, self.cfg.extra_chance)
+        if urge:
+            contents[-1]["parts"].append({"text": urge})  # not stored: it is only a nudge for this answer
         if media:
             contents[-1]["parts"] += media
         answer = await self.gemini.text(self.persona(), contents, 1024, models=self.gemini.lite_first)
         if answer.strip().upper().rstrip(".!") == SPAM:
             self.memory.drop_last_peer(peer)  # junk must not become the context of the next real talk
             return Reply("", spam=True)
-        answer, reaction = style.split_reaction(answer)
-        answer, note = split_note(answer)
-        self.memory.add_peer(peer, name, "model", answer or f"(реакция {reaction})")
-        return Reply(answer, note, reaction)
+        marks = style.split_marks(answer)
+        answer, note = split_note(marks.text)
+        self.memory.add_peer(peer, name, "model", answer or style.describe_marks(marks) or "…")
+        return Reply(answer, note, marks.reaction, sticker=marks.sticker, gif=marks.gif, love=marks.love)

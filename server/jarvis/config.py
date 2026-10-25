@@ -52,6 +52,14 @@ class Config:
     stranger_hourly: int
     stranger_daily: int
     call_minutes: int
+    # Groups: what Jarvis says in all of them (per group per hour, in total per day), and how often he reacts or
+    # comments on his own when nobody called him (share of pictures/videos, share of longer text messages)
+    group_hourly: int
+    group_daily: int
+    group_react_chance: float
+    group_text_chance: float
+    # How often a request carries the urge to throw in a sticker or a GIF (the model never does it on its own)
+    extra_chance: float
 
 
 def load() -> Config:
@@ -93,4 +101,9 @@ def load() -> Config:
         stranger_hourly=int(os.environ.get("STRANGER_HOURLY", "20")),
         stranger_daily=int(os.environ.get("STRANGER_DAILY", "300")),
         call_minutes=int(os.environ.get("CALL_MINUTES", "10")),
+        group_hourly=int(os.environ.get("GROUP_HOURLY", "20")),
+        group_daily=int(os.environ.get("GROUP_DAILY", "150")),
+        group_react_chance=float(os.environ.get("GROUP_REACT_CHANCE", "0.35")),
+        group_text_chance=float(os.environ.get("GROUP_TEXT_CHANCE", "0.05")),
+        extra_chance=float(os.environ.get("EXTRA_CHANCE", "0.15")),
     )

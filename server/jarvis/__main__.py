@@ -12,7 +12,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from . import calls, config, intents, phone, style, tg_user, voice, watchers, web
+from . import calls, config, groups, intents, phone, style, tg_user, voice, watchers, web
 from .brain import INBOX, Brain, Session
 from .front import Front
 from .gemini import Gemini, Strangers
@@ -30,6 +30,7 @@ HELP = ("Джарвис на связи. Пиши текстом или голо
         "Работаю на сервере 24/7, ноутбук нужен только для дел на нём. Команды не нужны: просто говори, "
         "например «позвони через 5 минут» или «стоп».\n"
         "/stop прервать · /status ноутбук и Telegram · /cost расход · /memory что помню · "
+        "/groups мои группы (/group 2 тихо — как себя вести там) · "
         "/watchers наблюдатели (/unwatch 3 — удалить) · /calltest позвонить в Telegram · /phonetest проверить SMS "
         "(/phonetest call — звонок робота) · /voice голосовые ответы вкл/выкл · /reset забыть разговор")
 
@@ -176,13 +177,14 @@ async def main() -> None:
         if answer is None:
             await chat.say(BUSY)
             return
-        answer, emoji = style.split_reaction(answer)
-        if emoji:
-            await chat.react(emoji)  # like a person's like under his message
-        if answer:
-            await send_long(chat, answer)
+        marks = style.split_marks(answer)
+        if marks.reaction and not marks.extras:
+            await chat.react(marks.reaction)  # like a person's like under his message
+        if marks.text:
+            await send_long(chat, marks.text)
             if spoken and state["voice_replies"]:
-                await send_voice(chat, answer)
+                await send_voice(chat, marks.text)
+        await chat.express(marks)  # a sticker or GIF of his own, now and then
 
     async def ask_from_laptop(text: str) -> str:
         """The laptop's voice or panel asks; the laptop speaks the answer, Telegram keeps a quiet copy."""
@@ -194,6 +196,7 @@ async def main() -> None:
         answer = await run_brain(chat, f"[голосом у ноутбука] {text}")
         if answer is None:
             return busy_text
+        answer = style.split_marks(answer).text  # the laptop reads it aloud: no mark lines
         await send_long(chat, answer, quiet=True)
         return answer
 
@@ -358,9 +361,31 @@ async def main() -> None:
             return "Напиши номер: /unwatch 3. Номера покажет /watchers."
         return f"Удалил #{number}." if memory.remove_watcher(int(number)) else f"Наблюдателя #{number} нет."
 
+    async def cmd_groups(_: str) -> str:
+        rows = memory.groups()
+        if not rows:
+            return "Я пока ни в одной группе. Добавь меня в чат, и я там поживу."
+        today = config.day_start()
+        lines = [f"{n}. «{title}»: {groups.MODES[mode]}, сегодня сказал {memory.group_count(chat, today)}"
+                 for n, (chat, title, mode) in enumerate(rows, 1)]
+        return "\n".join(lines) + "\n\nУправление: /group 2 тихо (или говори, выкл): номер или кусок названия."
+
+    async def cmd_group(text: str) -> str:
+        words = text.split()
+        mode = groups.MODE_WORDS.get(words[-1].lower()) if len(words) >= 3 else None
+        if mode is None:
+            return "Напиши так: /group 2 тихо (или говори, выкл). Номера покажет /groups."
+        which = " ".join(words[1:-1]).lower()
+        found = [row for n, row in enumerate(memory.groups(), 1) if which == str(n) or which in row[1].lower()]
+        if len(found) != 1:
+            return f"Не пойму, какая группа «{which}»: нашлось {len(found)}. Смотри /groups."
+        memory.set_group_mode(found[0][0], mode)
+        return f"«{found[0][1]}»: {groups.MODES[mode]}."
+
     commands = {"start": cmd_help, "help": cmd_help, "stop": cmd_stop, "reset": cmd_reset, "cost": cmd_cost,
                 "status": cmd_status, "memory": cmd_memory, "voice": cmd_voice, "phonetest": cmd_phonetest,
-                "calltest": cmd_calltest, "watchers": cmd_watchers, "unwatch": cmd_unwatch}
+                "calltest": cmd_calltest, "watchers": cmd_watchers, "unwatch": cmd_unwatch,
+                "groups": cmd_groups, "group": cmd_group}
 
     def command_of(text: str):
         words = text[1:].split(maxsplit=1) if text.startswith("/") else []

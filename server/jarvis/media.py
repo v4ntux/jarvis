@@ -46,27 +46,40 @@ async def shrink(data: bytes) -> bytes:
             return f.read()
 
 
-async def look(m, limit: int) -> tuple[str, list[dict]]:
-    """(what it is in words, parts for Gemini) for a photo, sticker, GIF, video or circle; ('', []) for the rest."""
+def label(m) -> str:
+    """What a message carries, in words and without downloading anything: '' for plain text."""
     if m.sticker:
-        emoji = (m.file.emoji or "").strip()
-        label = f"[стикер {emoji}]".replace(" ]", "]")
-        mime = m.file.mime_type or ""
-        if mime == "image/webp":
-            return label, [part("image/webp", await m.download_media(file=bytes))]
-        if mime in ("video/webm", "video/mp4") and (m.file.size or 0) <= INLINE_LIMIT:
-            return label, [part(mime, await m.download_media(file=bytes))]
-        thumb = await m.download_media(file=bytes, thumb=-1)  # animated (Lottie) stickers: the preview frame
-        return label, [part(sniff(thumb), thumb)] if thumb else []
+        emoji = ((m.file.emoji if m.file else "") or "").strip()
+        return f"[стикер {emoji}]".replace(" ]", "]")
     if m.photo:
-        return "[фото]", [part("image/jpeg", await m.download_media(file=bytes))]
+        return "[фото]"
     if m.gif or m.video or m.video_note:
         kind = "гифка" if m.gif else "кружок" if m.video_note else "видео"
+        seconds = int(m.file.duration or 0) if m.file else 0
+        return f"[{kind}" + (f" {seconds} сек]" if seconds and not m.gif else "]")
+    if m.document and m.file and (m.file.mime_type or "").startswith("image/"):
+        return "[картинка файлом]"
+    return ""
+
+
+async def look(m, limit: int) -> tuple[str, list[dict]]:
+    """(what it is in words, parts for Gemini) for a photo, sticker, GIF, video or circle; ('', []) for the rest."""
+    words = label(m)
+    if m.sticker:
+        mime = m.file.mime_type or ""
+        if mime == "image/webp":
+            return words, [part("image/webp", await m.download_media(file=bytes))]
+        if mime in ("video/webm", "video/mp4") and (m.file.size or 0) <= INLINE_LIMIT:
+            return words, [part(mime, await m.download_media(file=bytes))]
+        thumb = await m.download_media(file=bytes, thumb=-1)  # animated (Lottie) stickers: the preview frame
+        return words, [part(sniff(thumb), thumb)] if thumb else []
+    if m.photo:
+        return words, [part("image/jpeg", await m.download_media(file=bytes))]
+    if m.gif or m.video or m.video_note:
         seconds = int(m.file.duration or 0)
-        label = f"[{kind}" + (f" {seconds} сек]" if seconds and not m.gif else "]")
         if (m.file.size or 0) > limit:
             thumb = await m.download_media(file=bytes, thumb=-1)
-            return label + " (слишком большое, вижу только кадр)", [part(sniff(thumb), thumb)] if thumb else []
+            return words + " (слишком большое, вижу только кадр)", [part(sniff(thumb), thumb)] if thumb else []
         data = await m.download_media(file=bytes)
         mime = m.file.mime_type or "video/mp4"
         if len(data) > INLINE_LIMIT or seconds > MAX_SECONDS:
@@ -75,8 +88,10 @@ async def look(m, limit: int) -> tuple[str, list[dict]]:
             except Exception:
                 log.exception("video shrink failed")
                 thumb = await m.download_media(file=bytes, thumb=-1)
-                return label + " (не смог сжать, вижу только кадр)", [part(sniff(thumb), thumb)] if thumb else []
-        return label, [part(mime, data)]
-    if m.document and (m.file.mime_type or "").startswith("image/") and (m.file.size or 0) <= INLINE_LIMIT:
-        return "[картинка файлом]", [part(m.file.mime_type, await m.download_media(file=bytes))]
+                return words + " (не смог сжать, вижу только кадр)", [part(sniff(thumb), thumb)] if thumb else []
+        return words, [part(mime, data)]
+    if words:  # a picture sent as a file
+        if (m.file.size or 0) > INLINE_LIMIT:
+            return words + " (слишком большое)", []
+        return words, [part(m.file.mime_type, await m.download_media(file=bytes))]
     return "", []
