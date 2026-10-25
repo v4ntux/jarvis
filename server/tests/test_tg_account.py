@@ -1,5 +1,5 @@
-"""Jarvis's own Telegram account without Telegram, Gemini or real calls: phrase cutting,
-the stranger conversation rules and the yes/no answers in words.
+"""Jarvis's own Telegram account without Telegram, Gemini, Claude or real calls: the Gemini
+chain, the free chat in front of the brain, stranger rules, Live call audio and yes/no in words.
 
 Run from server/: python -m unittest discover -s tests
 """
@@ -13,11 +13,12 @@ from unittest.mock import patch
 
 import numpy as np
 
-from jarvis import calls, config, gemini, voice
+from jarvis import calls, config, gemini, tg_user, voice
+from jarvis.front import FREE_TOOLS, Front
 from jarvis.memory import Memory
 from jarvis.transport import UserChat
 
-ENV = {"OWNER_TG_ID": "1", "TG_BOT_TOKEN": "t", "ANTHROPIC_API_KEY": "k", "HANDS_TOKEN": "h"}
+ENV = {"OWNER_TG_ID": "1", "ANTHROPIC_API_KEY": "k", "HANDS_TOKEN": "h"}
 
 
 def make_cfg(**changes):
@@ -26,194 +27,188 @@ def make_cfg(**changes):
     return dataclasses.replace(cfg, **{"gemini_key": "g", **changes})
 
 
-def tone(ms, amplitude=3000, rate=calls.RATE):
-    t = np.arange(rate * ms // 1000) / rate
-    return (np.sin(2 * np.pi * 220 * t) * amplitude).astype(np.int16).tobytes()
+class FakeGemini:
+    """Answers with scripted parts, one list per call."""
+
+    def __init__(self, *answers, ready=True):
+        self.answers, self.ready, self.seen = list(answers), ready, []
+
+    async def generate(self, system, contents, tools=None, max_tokens=2048):
+        self.seen.append((system, contents, tools))
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    async def text(self, system, contents, max_tokens=2048):
+        return gemini.text_of(await self.generate(system, contents))
 
 
-def quiet(ms, rate=calls.RATE):
-    return (np.random.default_rng(0).normal(0, 20, rate * ms // 1000)).astype(np.int16).tobytes()
+class GeminiChainTests(unittest.IsolatedAsyncioTestCase):
+    def client(self, replies, models="a,b"):
+        g = gemini.Gemini(make_cfg(gemini_model=models))
+        self.asked = []
+
+        async def post(model, body):
+            self.asked.append((model, body))
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        g._post = post
+        return g
+
+    async def test_overloaded_model_hands_over_to_the_next(self):
+        g = self.client([(503, {"error": "high demand"}),
+                         (200, {"candidates": [{"content": {"parts": [{"text": "Привет"}]}}]})])
+        self.assertEqual(await g.text("s", []), "Привет")
+        self.assertEqual([m for m, _ in self.asked], ["a", "b"])
+        self.assertEqual(self.asked[0][1]["generationConfig"]["thinkingConfig"], {"thinkingLevel": "minimal"})
+
+    async def test_timeout_hands_over_too(self):
+        import httpx
+
+        g = self.client([httpx.ReadTimeout("slow"), (200, {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})])
+        self.assertEqual(await g.text("s", []), "ok")
+
+    async def test_all_down(self):
+        g = self.client([(503, {}), (429, {})])
+        with self.assertRaises(gemini.GeminiError):
+            await g.text("s", [])
+
+    async def test_function_calls_and_thoughts(self):
+        g = self.client([(200, {"candidates": [{"content": {"parts": [
+            {"text": "размышляю", "thought": True}, {"functionCall": {"name": "web_search", "args": {"query": "q"}}}]}}]})])
+        parts = await g.generate("s", [], tools=[{"name": "web_search"}])
+        self.assertEqual(parts[1]["functionCall"]["name"], "web_search")
+        self.assertEqual(gemini.text_of(parts), "")
+        self.assertEqual(self.asked[0][1]["tools"], [{"functionDeclarations": [{"name": "web_search"}]}])
 
 
-class EndpointerTests(unittest.TestCase):
-    def feed(self, ep, pcm, chunk=1234):
-        out = []
-        for i in range(0, len(pcm), chunk):  # odd chunk sizes, like the network gives
-            out += ep.feed(pcm[i:i + chunk])
-        return out
-
-    def test_phrase_between_silences(self):
-        ep = calls.Endpointer()
-        phrases = self.feed(ep, quiet(500) + tone(1000) + quiet(1000))
-        self.assertEqual(len(phrases), 1)
-        seconds = len(phrases[0]) / 2 / calls.RATE
-        self.assertGreater(seconds, 1.0)  # the start is kept thanks to the pre-roll
-        self.assertLess(seconds, 1.6)
-
-    def test_two_phrases(self):
-        ep = calls.Endpointer()
-        self.assertEqual(len(self.feed(ep, tone(600) + quiet(1000) + tone(600) + quiet(1000))), 2)
-
-    def test_short_pause_keeps_one_phrase(self):
-        ep = calls.Endpointer()
-        self.assertEqual(len(self.feed(ep, tone(500) + quiet(300) + tone(500) + quiet(1000))), 1)
-
-    def test_clicks_and_silence_are_not_phrases(self):
-        ep = calls.Endpointer()
-        self.assertEqual(self.feed(ep, quiet(2000) + tone(80) + quiet(1000) + tone(100) + quiet(1500)), [])
-
-    def test_unfinished_phrase_waits(self):
-        ep = calls.Endpointer()
-        self.assertEqual(self.feed(ep, tone(700) + quiet(300)), [])
-        self.assertEqual(len(self.feed(ep, quiet(800))), 1)
-
-    def test_talking_flag_for_interrupting(self):
-        ep = calls.Endpointer()
-        self.feed(ep, quiet(300) + tone(200))
-        self.assertFalse(ep.talking)
-        self.feed(ep, tone(400))
-        self.assertTrue(ep.talking)
-
-    def test_steady_noise_is_not_endless_speech(self):
-        ep = calls.Endpointer()
-        hum = tone(12_000, amplitude=600)
-        phrases = self.feed(ep, hum + quiet(1000))
-        # The bar rises with steady noise: no 30-second «phrase» of hum
-        self.assertTrue(all(len(p) / 2 / calls.RATE < 12 for p in phrases))
-
-    def test_bye_words(self):
-        for text in ("Ладно, пока!", "Отбой", "всё, до связи.", "Клади трубку"):
-            self.assertTrue(calls.BYE.search(text), text)
-        for text in ("пока не знаю", "Сделай отчёт", "отбойный молоток нужен"):
-            self.assertFalse(calls.BYE.search(text), text)
+class FakeHub:
+    online = True
+    routines = []
 
 
-class FakeCalls:
-    def __init__(self, seconds=0.0):
-        self.seconds, self.played = seconds, 0
+class FakeBrain:
+    """Stands in for the Claude brain: records what it was asked to do."""
 
-    async def play_pcm(self, peer, pcm):
-        self.played += 1
-        await asyncio.sleep(self.seconds)
+    def __init__(self, memory):
+        self.memory, self.cfg, self.hub = memory, make_cfg(), FakeHub()
+        self.replies, self.tools = [], []
 
+    async def reply(self, text, session, images=None):
+        self.replies.append(text)
+        return "сделал на ноутбуке ($0.02)"
 
-class ConversationTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.said, self.heard = [], []
+    async def _run_tool(self, name, args, session):
+        self.tools.append((name, args))
+        return {"text": "Напоминание #1 на 25.10 12:00."}
 
-        async def synth(text, rate):
-            self.said.append(text)
-            return b"\0" * calls.FRAME
-
-        async def recognize(pcm, rate):
-            return self.heard.pop(0)
-
-        for name, fake in (("synthesize_pcm", synth), ("transcribe_pcm", recognize)):
-            p = patch.object(voice, name, fake)
-            p.start()
-            self.addCleanup(p.stop)
-
-    async def wait_said(self, count):
-        for _ in range(200):
-            if len(self.said) >= count:
-                return
-            await asyncio.sleep(0.01)
-        self.fail(f"said only {self.said}")
-
-    async def test_talk_until_bye(self):
-        async def reply(text):
-            return f"ответ на «{text}»"
-
-        talk = calls.Conversation(FakeCalls(), 1, reply, "Слушаю.", minutes=5)
-        task = asyncio.create_task(talk.run())
-        self.heard += ["какая погода", "ну ладно, пока"]
-        talk.phrases.put_nowait(b"x")
-        await self.wait_said(2)
-        talk.phrases.put_nowait(b"y")
-        await asyncio.wait_for(task, 2)
-        self.assertEqual(self.said, ["Слушаю.", "ответ на «какая погода»", "До связи."])
-        self.assertEqual(talk.transcript[1], ("them", "какая погода"))
-
-    async def test_slow_answer_gets_a_filler(self):
-        async def reply(text):
-            await asyncio.sleep(0.2)
-            return "готово"
-
-        with patch.object(calls, "FILLER_AFTER", 0.05):
-            talk = calls.Conversation(FakeCalls(), 1, reply, "", minutes=5)
-            task = asyncio.create_task(talk.run())
-            self.heard += ["сделай отчёт"]
-            talk.phrases.put_nowait(b"x")
-            await self.wait_said(2)
-            task.cancel()
-        self.assertEqual(self.said, ["Секунду.", "готово"])
-
-    async def test_empty_recognition_is_skipped(self):
-        async def reply(text):
-            return "ответ"
-
-        talk = calls.Conversation(FakeCalls(), 1, reply, "", minutes=5)
-        task = asyncio.create_task(talk.run())
-        self.heard += ["", "пока"]
-        talk.phrases.put_nowait(b"x")
-        await asyncio.sleep(0.05)
-        talk.phrases.put_nowait(b"y")
-        await asyncio.wait_for(task, 2)
-        self.assertEqual(self.said, ["До связи."])
-
-    async def test_interrupting_stops_jarvis(self):
-        async def reply(text):
-            return "ответ"
-
-        talk = calls.Conversation(FakeCalls(seconds=5), 1, reply, "", minutes=5)
-        speaking = asyncio.create_task(talk.say("очень длинная речь"))
-        await asyncio.sleep(0.05)
-        talk.hear(tone(600))  # the owner starts talking over Jarvis
-        await asyncio.wait_for(speaking, 1)
-
-    async def test_out_of_time(self):
-        async def reply(text):
-            return "ответ"
-
-        talk = calls.Conversation(FakeCalls(), 1, reply, "Слушаю.", minutes=0)
-        await asyncio.wait_for(talk.run(), 1)
-        self.assertEqual(self.said[-1], "Время звонка вышло, продолжим в переписке.")
+    def _routine_command(self, text):
+        return "почта" if text == "сделай почту" else None
 
 
-class VoiceTests(unittest.TestCase):
-    def test_48k_to_16k(self):
-        audio = voice.to_16k(tone(1000), 48000)
-        self.assertEqual(len(audio), 16000)
-        self.assertLess(abs(audio).max(), 1.0)
+class FakeSession:
+    def __init__(self, yes=True):
+        self.lines, self.yes, self.asked = [], yes, []
 
-    def test_cost_footer_not_spoken(self):
-        self.assertEqual(voice._speakable("Готово.\n\n($0.02)"), "Готово.")
+    async def progress(self, line):
+        self.lines.append(line)
 
-    def test_sentences_for_tts(self):
-        self.assertEqual(voice.sentences("Привет, Джарвис. Какая погода?\n- Солнце!\n\n($0.01)"),
-                         ["Привет, Джарвис.", "Какая погода?", "- Солнце!"])
-        self.assertEqual(voice.sentences("```код```"), [])
+    async def confirm(self, question):
+        self.asked.append(question)
+        return self.yes
+
+
+class FrontTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.memory = Memory(os.path.join(self.tmp.name, "j.db"))
+        self.brain = FakeBrain(self.memory)
+
+    def tearDown(self):
+        self.memory.db.close()
+        self.tmp.cleanup()
+
+    def front(self, *answers, ready=True):
+        f = Front(self.brain, FakeGemini(*answers, ready=ready))
+        return f
+
+    async def test_small_talk_is_free(self):
+        f = self.front([{"text": "Привет, Ван."}])
+        self.assertEqual(await f.reply("привет", FakeSession()), "Привет, Ван.")
+        self.assertEqual(self.brain.replies, [])
+        self.assertEqual([m["content"] for m in self.memory.recent(5)], ["привет", "Привет, Ван."])
+
+    async def test_free_tool_then_answer(self):
+        f = self.front([{"functionCall": {"name": "set_reminder", "args": {"text": "чайник", "in_minutes": 10}}}],
+                       [{"text": "Напомню через 10 минут."}])
+        self.assertEqual(await f.reply("напомни про чайник", FakeSession()), "Напомню через 10 минут.")
+        self.assertEqual(self.brain.tools, [("set_reminder", {"text": "чайник", "in_minutes": 10})])
+        self.assertEqual(self.brain.replies, [])
+        answer = f.gemini.seen[1][1][-1]["parts"][0]["functionResponse"]
+        self.assertEqual(answer["name"], "set_reminder")
+        self.assertIn("[действия: set_reminder]", self.memory.recent(5)[-1]["content"])
+
+    async def test_real_work_goes_to_the_brain(self):
+        f = self.front([{"functionCall": {"name": "delegate", "args": {"task": "открыть блокнот"}}}])
+        self.assertEqual(await f.reply("открой блокнот", FakeSession()), "сделал на ноутбуке ($0.02)")
+        self.assertEqual(self.brain.replies, ["открой блокнот\n[Задача: открыть блокнот]"])
+        self.assertEqual(self.memory.recent(5), [])  # the brain keeps its own history
+
+    async def test_saying_it_hands_over_without_calling_still_hands_over(self):
+        f = self.front([{"text": "Это работа для сервера. Передаю задачу старшему мозгу."}])
+        await f.reply("скачай видео", FakeSession())
+        self.assertEqual(self.brain.replies, ["скачай видео"])
+
+    async def test_unknown_tool_is_real_work_too(self):
+        f = self.front([{"functionCall": {"name": "run_shell", "args": {"command": "dir"}}}])
+        await f.reply("покажи файлы", FakeSession())
+        self.assertEqual(len(self.brain.replies), 1)
+        self.assertEqual(self.brain.tools, [])
+
+    async def test_gemini_down_brain_answers_with_what_was_done(self):
+        f = self.front([{"functionCall": {"name": "remember", "args": {"text": "кот Барсик"}}}],
+                       gemini.GeminiError("503"))
+        await f.reply("запомни кота", FakeSession())
+        self.assertEqual(self.brain.replies, ["запомни кота\n[Уже сделано: remember]"])
+
+    async def test_think_word_routine_and_no_key_skip_gemini(self):
+        for text in ("подумай хорошенько над планом", "сделай почту"):
+            f = self.front()
+            await f.reply(text, FakeSession())
+        await self.front(ready=False).reply("привет", FakeSession())
+        self.assertEqual(len(self.brain.replies), 3)
+
+    async def test_watcher_with_a_command_needs_a_yes(self):
+        f = self.front()
+        session = FakeSession(yes=False)
+        result = await f.run_tool("add_watcher", {"source": "laptop", "command": "Get-Content x"}, session)
+        self.assertTrue(result.startswith("Ошибка"))
+        self.assertEqual(self.brain.tools, [])
+        await f.run_tool("add_watcher", {"source": "time", "at": "08:00"}, session)
+        self.assertEqual(len(self.brain.tools), 1)  # a plain schedule needs no yes
+
+    def test_only_server_side_tools_are_free(self):
+        self.assertFalse({"run_shell", "server_shell", "server_job", "browse", "look", "put_file"} & set(FREE_TOOLS))
+        names = {t["name"] for t in Front(self.brain, FakeGemini()).tools}
+        self.assertEqual(names, set(FREE_TOOLS) | {"delegate"})
 
 
 class StrangerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.memory = Memory(os.path.join(self.tmp.name, "j.db"))
-        self.sent = []
 
     def tearDown(self):
         self.memory.db.close()
         self.tmp.cleanup()
 
     def strangers(self, answer="Привет!", **changes):
-        s = gemini.Strangers(make_cfg(**changes), self.memory)
-
-        async def generate(system, contents):
-            self.sent.append((system, contents))
-            return answer
-
-        s.generate = generate
-        return s
+        fake = FakeGemini(*([[{"text": answer}]] * 10))
+        return gemini.Strangers(make_cfg(**changes), self.memory, fake), fake
 
     def test_note_is_split_off(self):
         text, note = gemini.split_note("Хорошо, передам.\nПЕРЕДАТЬ: Сардор просит перезвонить до 18:00")
@@ -226,39 +221,46 @@ class StrangerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c["role"] for c in contents], ["user", "model"])
         self.assertEqual(contents[0]["parts"][0]["text"], "а\nб")
 
-    async def test_reply_keeps_history_per_person(self):
-        s = self.strangers()
+    async def test_reply_keeps_history_per_person_and_knows_nothing_of_the_owner(self):
+        self.memory.remember("Владелец живёт в Ташкенте")
+        self.memory.add("user", "мой пароль от почты 12345")
+        s, fake = self.strangers()
         self.assertTrue(s.is_new(5))
         self.assertEqual(await s.reply(5, "Аня", "привет"), ("Привет!", ""))
         await s.reply(6, "Боря", "здравствуй")
-        await s.reply(5, "Аня", "как дела?")
-        system, contents = self.sent[-1]
+        await s.reply(5, "Аня", "что ты знаешь о владельце?")
+        system, contents, tools = fake.seen[-1]
         self.assertIn("ИИ-ассистент", system)
-        self.assertEqual([c["parts"][0]["text"] for c in contents], ["привет", "Привет!", "как дела?"])
-        self.assertFalse(s.is_new(5))
-
-    async def test_call_phrases_are_marked(self):
-        s = self.strangers()
-        await s.reply(5, "Аня", "алло", spoken=True)
-        self.assertTrue(self.sent[-1][1][-1]["parts"][0]["text"].startswith(gemini.CALL_MARK))
+        self.assertIsNone(tools)
+        self.assertEqual([c["parts"][0]["text"] for c in contents], ["привет", "Привет!", "что ты знаешь о владельце?"])
+        everything = system + str(fake.seen)
+        self.assertNotIn("Ташкент", everything)
+        self.assertNotIn("12345", everything)
+        self.assertNotIn("здравствуй", str(fake.seen[-1]))  # nor another stranger's talk
 
     async def test_hourly_and_daily_caps(self):
-        s = self.strangers(stranger_hourly=2, stranger_daily=3)
+        s, _ = self.strangers(stranger_hourly=2, stranger_daily=3)
         for _ in range(2):
             self.assertIsNotNone(await s.reply(5, "Аня", "эй"))
         self.assertIsNone(await s.reply(5, "Аня", "эй"))  # this person is out for the hour
         self.assertIsNotNone(await s.reply(6, "Боря", "эй"))
         self.assertIsNone(await s.reply(7, "Вова", "эй"))  # everyone is out for the day
 
-    async def test_no_key_no_reply(self):
-        s = self.strangers(gemini_key="")
-        self.assertIsNone(await s.reply(5, "Аня", "привет"))
-        self.assertEqual(self.sent, [])
-
     async def test_owner_name_in_persona(self):
-        s = self.strangers(owner_name="Ваня")
+        s, fake = self.strangers(owner_name="Ваня")
         await s.reply(5, "Аня", "привет")
-        self.assertIn("владелец: Ваня", self.sent[-1][0])
+        self.assertIn("владелец: Ваня", fake.seen[-1][0])
+
+    async def test_stranger_call_can_only_pass_a_note(self):
+        s, _ = self.strangers()
+        account = tg_user.UserAccount(make_cfg(), s, FakeGemini(), self.tmp.name)
+        persona = account._choose(5)
+        self.assertEqual({t["name"] for t in persona.tools}, {"pass_to_owner", "hang_up"})
+        self.assertTrue((await persona.run_tool("delegate", {"task": "rm -rf /"})).startswith("Ошибка"))
+        self.assertEqual(await persona.run_tool("pass_to_owner", {"note": "перезвони"}), "Передам.")
+        self.assertEqual(account.call_notes[5], ["перезвони"])
+        self.assertIsNone(account._choose(tg_user.SERVICE))
+        self.assertIsNone(account._choose(1))  # the owner's calls need the owner's persona from the bot
 
     def test_recent_chats(self):
         self.memory.add_peer(5, "Аня", "user", "привет")
@@ -266,6 +268,102 @@ class StrangerTests(unittest.IsolatedAsyncioTestCase):
         self.memory.add_peer(6, "Боря", "user", "здравствуй")
         self.memory.add_peer(6, "Боря", "model", "добрый день")
         self.assertEqual([(p, n, c) for p, n, _, c in self.memory.peer_chats(10)], [(6, "Боря", 2), (5, "Аня", 1)])
+
+
+class FakeCalls:
+    voice, key, models = "Charon", "k", ["m"]
+
+    def __init__(self):
+        self.frames = []
+
+    async def send_frame(self, peer, frame):
+        self.frames.append(frame)
+
+
+class LiveTests(unittest.IsolatedAsyncioTestCase):
+    def test_resampling(self):
+        tone = (np.sin(np.arange(4800) / 10) * 8000).astype(np.int16).tobytes()
+        self.assertEqual(len(calls.down(tone)), len(tone) // 3)
+        self.assertEqual(len(calls.up(tone)), len(tone) * 2)
+        self.assertEqual(calls.up(b""), b"")
+        self.assertLess(np.abs(np.frombuffer(calls.up(calls.down(tone)), np.int16)).max(), 8200)
+
+    def talk(self, run_tool=None):
+        return calls.LiveTalk(FakeCalls(), 1, calls.Persona("sys", "Поздоровайся", [{"name": "x"}], run_tool))
+
+    def test_setup_has_voice_tools_and_transcripts(self):
+        setup = self.talk().setup("gemini-live")["setup"]
+        self.assertEqual(setup["model"], "models/gemini-live")
+        self.assertEqual(setup["tools"], [{"functionDeclarations": [{"name": "x"}]}])
+        self.assertIn("inputAudioTranscription", setup)
+        self.assertEqual(setup["generationConfig"]["responseModalities"], ["AUDIO"])
+
+    def test_audio_transcripts_and_interruption(self):
+        import base64
+
+        talk = self.talk()
+        chunk = base64.b64encode(b"\x01\x00" * 240).decode()
+        self.assertIsNone(talk.on_server({"serverContent": {"inputTranscription": {"text": "Какая "}}}))
+        talk.on_server({"serverContent": {"inputTranscription": {"text": "погода?"}}})
+        talk.on_server({"serverContent": {"modelTurn": {"parts": [{"inlineData": {"data": chunk}}]},
+                                          "outputTranscription": {"text": "Солнечно."}}})
+        self.assertEqual(len(talk.speaker), 240 * 2 * 2)
+        talk.on_server({"serverContent": {"interrupted": True}})
+        self.assertEqual(len(talk.speaker), 0)  # talked over: the rest is dropped
+        self.assertEqual(talk.on_server({"serverContent": {"turnComplete": True}}), "turn")
+        self.assertEqual(talk.transcript, [("them", "Какая погода?"), ("jarvis", "Солнечно.")])
+
+    async def test_tool_calls_answer_back(self):
+        sent = []
+
+        async def run_tool(name, args):
+            return f"сделал {name} {args}"
+
+        talk = self.talk(run_tool)
+
+        async def send(message):
+            sent.append(message)
+
+        talk._send = send
+        talk.on_server({"toolCall": {"functionCalls": [{"id": "7", "name": "set_reminder", "args": {"a": 1}}]}})
+        await asyncio.sleep(0.01)
+        answer = sent[0]["toolResponse"]["functionResponses"][0]
+        self.assertEqual((answer["id"], answer["name"]), ("7", "set_reminder"))
+        self.assertIn("сделал set_reminder", answer["response"]["result"])
+
+    async def test_hang_up_ends_the_talk(self):
+        talk = self.talk()
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        talk._send = send
+        talk.task = asyncio.create_task(asyncio.sleep(10))
+        with patch.object(calls, "HANG_UP_AFTER", 0.01):
+            talk.on_server({"toolCall": {"functionCalls": [{"id": "1", "name": "hang_up"}]}})
+            await asyncio.sleep(0.05)
+        self.assertTrue(talk.ending)
+        self.assertTrue(talk.task.cancelled())
+
+    async def test_player_paces_frames(self):
+        talk = self.talk()
+        talk.speaker += b"\0" * calls.FRAME * 10
+        player = asyncio.create_task(talk._player())
+        await asyncio.sleep(0.05)
+        player.cancel()
+        self.assertTrue(4 <= len(talk.calls.frames) <= 10)
+        self.assertTrue(all(len(f) == calls.FRAME for f in talk.calls.frames))
+
+
+class VoiceTests(unittest.TestCase):
+    def test_cost_footer_not_spoken(self):
+        self.assertEqual(voice._speakable("Готово.\n\n($0.02)"), "Готово.")
+
+    def test_sentences_for_tts(self):
+        self.assertEqual(voice.sentences("Привет, Джарвис. Какая погода?\n- Солнце!\n\n($0.01)"),
+                         ["Привет, Джарвис.", "Какая погода?", "- Солнце!"])
+        self.assertEqual(voice.sentences("```код```"), [])
 
 
 class FakeTelethon:
@@ -281,7 +379,7 @@ class UserChatTests(unittest.IsolatedAsyncioTestCase):
         chat = UserChat(FakeTelethon(), 1)
         ask = asyncio.create_task(chat.confirm("Удалить файл?"))
         await asyncio.sleep(0)
-        self.assertFalse(chat.answer("а что за файл?"))  # not an answer: goes to the brain as usual
+        self.assertFalse(chat.answer("а что за файл?"))  # not an answer: goes on as a normal message
         self.assertTrue(chat.answer("Да!"))
         self.assertTrue(await ask)
         self.assertFalse(chat.answer("да"))  # nothing pending any more

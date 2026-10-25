@@ -1,188 +1,253 @@
-"""Telegram voice calls of Jarvis's own account: answer, ring someone, talk.
+"""Telegram voice calls of Jarvis's own account, through Gemini Live.
 
-Sound goes both ways as raw 48 kHz mono PCM through py-tgcalls. The other side's voice
-is cut into phrases by loudness, recognized by Whisper, answered by whoever the account
-decides (the brain for the owner, Gemini for everyone else) and spoken back with Edge TTS.
+The call's sound (48 kHz mono PCM from py-tgcalls) streams to a Gemini Live session at 16 kHz.
+Gemini listens, understands and answers with its own voice at 24 kHz, which plays back into
+the call. When the other side talks over Jarvis, Gemini says so and the queued sound is dropped.
+Functions let it act: the owner's calls can do what the free chat can, everyone else's can only
+pass a note on.
 """
 import asyncio
-import collections
+import base64
+import json
 import logging
-import re
 import time
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+import aiohttp
 import numpy as np
-
-from . import voice
 
 log = logging.getLogger("jarvis.calls")
 
 RATE = 48000
 FRAME = RATE // 100 * 2  # bytes in 10 ms of 16-bit mono
+IN_RATE, OUT_RATE = 16000, 24000
 RING_SECONDS = 45
-SILENCE_HANGUP = 90
-FILLER_AFTER = 4
-BYE = re.compile(r"(пока|отбой|до свидания|до связи|клади трубку|положи трубку|конец связи|отключайся)[\s.!]*$",
-                 re.I)
-
-Reply = Callable[[str], Awaitable[str]]
-
-
-class Endpointer:
-    """Cuts 16-bit mono PCM into phrases by loudness.
-
-    A phrase starts after START_MS of sound and ends after END_MS of quiet. The noise level is
-    the quietest 5% of the last FLOOR_MS: pauses between words keep it at the real background,
-    while steady noise raises it within seconds.
-    """
-    START_MS = 150
-    END_MS = 800
-    PREROLL_MS = 300
-    MIN_VOICED_MS = 250
-    MAX_MS = 30_000
-    MIN_RMS = 300.0
-    FLOOR_MS = 5000
-
-    def __init__(self, rate: int = RATE):
-        self.size = rate // 100  # samples in 10 ms
-        # Starts as one second of quiet line, so speech right away is not taken for noise
-        self.levels: collections.deque = collections.deque([self.MIN_RMS / 3] * 100, maxlen=self.FLOOR_MS // 10)
-        self.rest = np.zeros(0, np.int16)
-        self.preroll: collections.deque = collections.deque(maxlen=self.PREROLL_MS // 10)
-        self.phrase: list[np.ndarray] | None = None
-        self.loud_run = self.quiet_run = self.voiced = 0
-
-    @property
-    def talking(self) -> bool:
-        """The other side has been speaking for a moment now: Jarvis should stop and listen."""
-        return self.phrase is not None and self.quiet_run < 30 and self.voiced >= 40
-
-    def feed(self, pcm: bytes) -> list[bytes]:
-        samples = np.concatenate([self.rest, np.frombuffer(pcm, np.int16)])
-        count = len(samples) // self.size
-        self.rest = samples[count * self.size:]
-        done = []
-        for i in range(count):
-            frame = samples[i * self.size:(i + 1) * self.size]
-            rms = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
-            self.levels.append(rms)
-            loud = rms > max(float(np.percentile(self.levels, 5)) * 3, self.MIN_RMS)
-            if self.phrase is None:
-                self.preroll.append(frame)
-                self.loud_run = self.loud_run + 1 if loud else 0
-                if self.loud_run * 10 >= self.START_MS:
-                    self.phrase, self.voiced, self.quiet_run = list(self.preroll), self.loud_run, 0
-                    self.preroll.clear()
-                continue
-            self.phrase.append(frame)
-            if loud:
-                self.voiced, self.quiet_run = self.voiced + 1, 0
-            else:
-                self.quiet_run += 1
-            if self.quiet_run * 10 >= self.END_MS or len(self.phrase) * 10 >= self.MAX_MS:
-                if self.voiced * 10 >= self.MIN_VOICED_MS:
-                    keep = len(self.phrase) - max(0, self.quiet_run - 20)  # 200 ms of the tail is enough
-                    done.append(np.concatenate(self.phrase[:keep]).tobytes())
-                self.phrase, self.loud_run = None, 0
-        return done
+SEND_EVERY = 0.04
+HANG_UP_AFTER = 8
+MIC_KEEP = IN_RATE * 2  # bytes: at most a second of sound waits for the session to open
+LIVE_URL = ("wss://generativelanguage.googleapis.com/ws/"
+            "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent")
 
 
-class Conversation:
-    """One call: listen, answer, speak, until someone hangs up or says goodbye."""
+@dataclass
+class Persona:
+    """Who Jarvis is in this call and what it may do."""
+    system: str
+    opener: str  # a cue for the first words, e.g. «Поздоровайся» or «Скажи: …»
+    tools: list[dict] = field(default_factory=list)  # Gemini function declarations
+    run_tool: Callable[[str, dict], Awaitable[str]] | None = None
 
-    def __init__(self, calls: "Calls", peer: int, reply: Reply, opener: str, minutes: int):
-        self.calls, self.peer, self.reply, self.opener = calls, peer, reply, opener
-        self.deadline = time.monotonic() + minutes * 60
+
+def down(pcm: bytes) -> bytes:
+    """48 kHz → 16 kHz; averaging three samples also filters what plain decimation would alias."""
+    audio = np.frombuffer(pcm[: len(pcm) // 6 * 6], np.int16).astype(np.int32)
+    return audio.reshape(-1, 3).mean(axis=1).astype(np.int16).tobytes()
+
+
+def up(pcm: bytes) -> bytes:
+    """24 kHz → 48 kHz by linear interpolation."""
+    audio = np.frombuffer(pcm[: len(pcm) // 2 * 2], np.int16).astype(np.float32)
+    if not len(audio):
+        return b""
+    out = np.empty(len(audio) * 2, np.float32)
+    out[0::2] = audio
+    out[1::2] = (audio + np.append(audio[1:], audio[-1])) / 2
+    return out.astype(np.int16).tobytes()
+
+
+class LiveTalk:
+    """One call bridged to one Gemini Live session."""
+
+    def __init__(self, calls: "Calls", peer: int, persona: Persona):
+        self.calls, self.peer, self.persona = calls, peer, persona
         self.started = time.monotonic()
-        self.ears = Endpointer()
-        self.phrases: asyncio.Queue[bytes] = asyncio.Queue()
-        self.mouth: asyncio.Task | None = None
-        self.task: asyncio.Task | None = None
+        self.mic = bytearray()  # the other side, 16 kHz, waiting to be sent
+        self.speaker = bytearray()  # Jarvis's voice, 48 kHz, waiting to be played
         self.transcript: list[tuple[str, str]] = []
+        self.heard, self.said = "", ""
+        self.ending = False
+        self.task: asyncio.Task | None = None
+        self._send: Callable[[dict], Awaitable[None]] | None = None
+        self._tools: set[asyncio.Task] = set()
 
     @property
     def minutes(self) -> float:
         return (time.monotonic() - self.started) / 60
 
     def hear(self, pcm: bytes) -> None:
-        for phrase in self.ears.feed(pcm):
-            self.phrases.put_nowait(phrase)
-        if self.mouth and not self.mouth.done() and self.ears.talking:
-            self.mouth.cancel()  # interrupted: stop talking and listen
+        self.mic += down(pcm)
+        if len(self.mic) > MIC_KEEP and self._send is None:
+            del self.mic[:-MIC_KEEP]
 
-    async def say(self, text: str) -> None:
-        if not text:
-            return
-        self.transcript.append(("jarvis", text))
-        self.mouth = asyncio.create_task(self._speak(text))
-        try:
-            await asyncio.wait({self.mouth})
-        finally:
-            self.mouth.cancel()
+    def setup(self, model: str) -> dict:
+        p = self.persona
+        setup = {"model": f"models/{model}",
+                 "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {
+                     "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self.calls.voice}}}},
+                 "systemInstruction": {"parts": [{"text": p.system}]},
+                 "inputAudioTranscription": {}, "outputAudioTranscription": {}}
+        if p.tools:
+            setup["tools"] = [{"functionDeclarations": p.tools}]
+        return {"setup": setup}
 
-    async def _speak(self, text: str) -> None:
-        # Every sentence is synthesized at once, and the first one plays as soon as it is ready
-        parts = [asyncio.create_task(voice.synthesize_pcm(s, RATE)) for s in voice.sentences(text)]
-        try:
-            for part in parts:
-                await self.calls.play_pcm(self.peer, await part)
-        except Exception:
-            log.exception("speaking failed")
-        finally:
-            for part in parts:
-                part.cancel()
-
-    async def run(self) -> None:
-        await self.say(self.opener)
-        while True:
-            left = self.deadline - time.monotonic()
-            if left <= 0:
-                await self.say("Время звонка вышло, продолжим в переписке.")
-                return
+    async def run(self, minutes: int) -> None:
+        async with aiohttp.ClientSession() as http:
+            ws = await self._connect(http)
             try:
-                phrase = await asyncio.wait_for(self.phrases.get(), min(left, SILENCE_HANGUP))
-            except asyncio.TimeoutError:
-                if time.monotonic() < self.deadline:
-                    await self.say("Не слышу тебя, отключаюсь.")
-                    return
-                continue
-            while not self.phrases.empty():  # phrases that came in meanwhile belong together
-                phrase += self.phrases.get_nowait()
-            text = await voice.transcribe_pcm(phrase, RATE)
-            if not text:
-                continue
-            self.transcript.append(("them", text))
-            if BYE.search(text) and len(text) < 60:
-                await self.say("До связи.")
-                return
-            await self.say(await self._answer(text))
+                self._send = ws.send_json
+                await self.cue(self.persona.opener)
+                workers = [asyncio.create_task(self._sender()), asyncio.create_task(self._player())]
+                try:
+                    await asyncio.wait_for(self._receive(ws), minutes * 60)
+                except asyncio.TimeoutError:
+                    await self.cue("Время звонка вышло: скажи об этом одной фразой и попрощайся.")
+                    await asyncio.wait_for(self._receive(ws, until_turn=True), 20)
+                    await self._drain()
+                finally:
+                    for task in workers + list(self._tools):
+                        task.cancel()
+            finally:
+                await ws.close()
 
-    async def _answer(self, text: str) -> str:
-        # The reply keeps going even if the call drops: the owner still gets it in the chat
-        task = asyncio.create_task(self.reply(text))
-        done, _ = await asyncio.wait({task}, timeout=FILLER_AFTER)
-        if not done:
-            await self.say("Секунду.")
-            await asyncio.wait({task})
-        try:
-            return task.result()
-        except Exception:
-            log.exception("call reply failed")
-            return "Что-то сломалось, попробуй ещё раз."
+    async def _connect(self, http: aiohttp.ClientSession):
+        """The first model in the chain that opens a session."""
+        errors = []
+        for model in self.calls.models:
+            try:
+                ws = await http.ws_connect(LIVE_URL, params={"key": self.calls.key}, heartbeat=20, max_msg_size=0)
+                await ws.send_json(self.setup(model))
+                msg = await ws.receive(timeout=15)
+                if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY) and \
+                        "setupComplete" in json.loads(msg.data):
+                    log.info("live session with %s on %s", self.peer, model)
+                    return ws
+                errors.append(f"{model}: {msg.type} {ws.close_code} {str(msg.data)[:200]}")
+                await ws.close()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                errors.append(f"{model}: {type(e).__name__}: {e}")
+        raise RuntimeError("Gemini Live не открылся: " + "; ".join(errors))
+
+    async def cue(self, text: str) -> None:
+        if text and self._send:
+            await self._send({"clientContent": {"turns": [{"role": "user", "parts": [{"text": text}]}],
+                                                "turnComplete": True}})
+
+    async def _receive(self, ws, until_turn: bool = False) -> None:
+        async for msg in ws:
+            if msg.type not in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
+                break
+            if self.on_server(json.loads(msg.data)) == "turn" and (until_turn or self.ending):
+                if self.ending:
+                    await self._drain()
+                return
+        log.info("live session with %s closed: %s", self.peer, ws.close_code)
+
+    def on_server(self, data: dict) -> str | None:
+        """Handles one message from Gemini; returns «turn» when Jarvis has finished speaking."""
+        content = data.get("serverContent") or {}
+        for part in (content.get("modelTurn") or {}).get("parts", []):
+            inline = part.get("inlineData")
+            if inline and inline.get("data"):
+                self.speaker += up(base64.b64decode(inline["data"]))
+        if content.get("interrupted"):
+            self.speaker.clear()  # talked over: stop at once and listen
+        if (content.get("inputTranscription") or {}).get("text"):
+            self._flush("jarvis")
+            self.heard += content["inputTranscription"]["text"]
+        if (content.get("outputTranscription") or {}).get("text"):
+            self._flush("them")
+            self.said += content["outputTranscription"]["text"]
+        for call in (data.get("toolCall") or {}).get("functionCalls", []):
+            task = asyncio.create_task(self._tool(call))
+            self._tools.add(task)
+            task.add_done_callback(self._tools.discard)
+        if data.get("goAway"):
+            log.info("live session with %s ends soon: %s", self.peer, data["goAway"])
+        if content.get("turnComplete"):
+            self._flush("them")
+            self._flush("jarvis")
+            return "turn"
+        return None
+
+    def _flush(self, who: str) -> None:
+        text = (self.heard if who == "them" else self.said).strip()
+        if text:
+            self.transcript.append((who, text))
+        if who == "them":
+            self.heard = ""
+        else:
+            self.said = ""
+
+    async def _tool(self, call: dict) -> None:
+        name, args = call.get("name", ""), call.get("args") or {}
+        if name == "hang_up":
+            self.ending = True
+            result = "Кладу трубку после прощания."
+            # The goodbye may already have been said: do not wait for another turn forever
+            asyncio.get_running_loop().call_later(HANG_UP_AFTER, self._end_now)
+        elif self.persona.run_tool:
+            try:
+                result = await self.persona.run_tool(name, args)
+            except Exception as e:
+                log.exception("call tool %s failed", name)
+                result = f"Ошибка: {type(e).__name__}: {e}"
+        else:
+            result = "Ошибка: здесь нет инструментов."
+        if self._send:
+            await self._send({"toolResponse": {"functionResponses": [
+                {"id": call.get("id"), "name": name, "response": {"result": result[:4000]}}]}})
+
+    async def _sender(self) -> None:
+        while True:
+            await asyncio.sleep(SEND_EVERY)
+            if self.mic:
+                chunk = bytes(self.mic)
+                self.mic.clear()
+                await self._send({"realtimeInput": {"audio": {"data": base64.b64encode(chunk).decode(),
+                                                              "mimeType": f"audio/pcm;rate={IN_RATE}"}}})
+
+    async def _player(self) -> None:
+        loop = asyncio.get_running_loop()
+        due = loop.time()
+        while True:
+            if len(self.speaker) < FRAME:
+                await asyncio.sleep(0.01)
+                due = loop.time()
+                continue
+            frame = bytes(self.speaker[:FRAME])
+            del self.speaker[:FRAME]
+            await self.calls.send_frame(self.peer, frame)
+            due += 0.01
+            ahead = due - loop.time()
+            if ahead > 0.04:  # real time pace, about 40 ms ahead of the listener
+                await asyncio.sleep(ahead - 0.04)
+
+    def _end_now(self) -> None:
+        if self.task and not self.task.done():
+            self.task.cancel()
+
+    async def _drain(self) -> None:
+        """Let the last words play before hanging up."""
+        for _ in range(500):
+            if len(self.speaker) < FRAME:
+                return
+            await asyncio.sleep(0.02)
 
 
 class Calls:
     """Private calls on top of a logged-in Telethon client."""
 
-    def __init__(self, client, choose: Callable[[int], tuple[Reply, str] | None],
-                 ended: Callable[[int, Conversation], Awaitable[None]], minutes: int):
+    def __init__(self, client, key: str, models: str, voice: str, choose: Callable[[int], Persona | None],
+                 ended: Callable[[int, LiveTalk], Awaitable[None]], minutes: int):
         from pytgcalls import PyTgCalls
 
         self.app = PyTgCalls(client)
-        # choose(peer) → (reply, opener) to answer an incoming call, None to decline it
-        self.choose, self.ended, self.minutes = choose, ended, minutes
-        self.talks: dict[int, Conversation] = {}
-        self._frame_logged = False
+        self.key, self.voice, self.minutes = key, voice, minutes
+        self.models = [m.strip() for m in models.split(",") if m.strip()]
+        # choose(peer) → how to answer an incoming call, None to decline it
+        self.choose, self.ended = choose, ended
+        self.talks: dict[int, LiveTalk] = {}
 
     async def start(self) -> None:
         from pytgcalls import filters
@@ -194,23 +259,20 @@ class Calls:
         self.app.on_update(filters.stream_frame(Direction.INCOMING))(self._frames)
         await self.app.start()
 
-    def busy(self, peer: int) -> bool:
-        return peer in self.talks
-
-    async def call(self, peer: int, opener: str, reply: Reply) -> bool:
+    async def call(self, peer: int, persona: Persona) -> bool:
         """Rings peer; True once they pick up (the talk goes on in the background), False if not."""
         if peer in self.talks:
-            await self.talks[peer].say(opener)
+            await self.talks[peer].cue(persona.opener)
             return True
         answered = asyncio.get_running_loop().create_future()
-        asyncio.create_task(self._talk(peer, reply, opener, answered))
+        asyncio.create_task(self._talk(peer, persona, answered))
         return await answered
 
-    async def _talk(self, peer: int, reply: Reply, opener: str, answered: asyncio.Future | None = None) -> None:
+    async def _talk(self, peer: int, persona: Persona, answered: asyncio.Future | None = None) -> None:
         from pytgcalls.types import CallConfig, ExternalMedia, MediaStream, RecordStream
         from pytgcalls.types.raw import AudioParameters
 
-        talk = Conversation(self, peer, reply, opener, self.minutes)
+        talk = LiveTalk(self, peer, persona)
         talk.task = asyncio.current_task()
         self.talks[peer] = talk
         connected = False
@@ -222,7 +284,7 @@ class Calls:
             connected = True
             if answered and not answered.done():
                 answered.set_result(True)
-            await talk.run()
+            await talk.run(self.minutes)
         except asyncio.CancelledError:
             pass  # the other side hung up
         except Exception as e:
@@ -244,26 +306,20 @@ class Calls:
         except Exception:
             pass  # already gone
 
-    async def play_pcm(self, peer: int, pcm: bytes) -> None:
+    async def send_frame(self, peer: int, frame: bytes) -> None:
         from pytgcalls.types import Device
 
-        loop = asyncio.get_running_loop()
-        start = loop.time()
-        for n, i in enumerate(range(0, len(pcm) - FRAME + 1, FRAME)):
-            ahead = start + n * 0.01 - loop.time()
-            if ahead > 0.06:  # real time pace, about 40 ms ahead of the listener
-                await asyncio.sleep(ahead - 0.04)
-            await self.app.send_frame(peer, Device.MICROPHONE, pcm[i:i + FRAME])
+        await self.app.send_frame(peer, Device.MICROPHONE, frame)
 
     async def _incoming(self, _, update) -> None:
         peer = update.chat_id
-        choice = None if peer in self.talks else self.choose(peer)
-        if choice is None:
+        persona = None if peer in self.talks else self.choose(peer)
+        if persona is None:
             log.info("declining call from %s", peer)
             await self.hang_up(peer)
             return
         log.info("answering call from %s", peer)
-        asyncio.create_task(self._talk(peer, *choice))
+        asyncio.create_task(self._talk(peer, persona))
 
     async def _left(self, _, update) -> None:
         talk = self.talks.get(update.chat_id)
@@ -272,10 +328,6 @@ class Calls:
 
     async def _frames(self, _, update) -> None:
         talk = self.talks.get(update.chat_id)
-        if not talk:
-            return
-        for frame in update.frames:
-            if not self._frame_logged:
-                self._frame_logged = True
-                log.info("first call frame: %d bytes", len(frame.frame))
-            talk.hear(frame.frame)
+        if talk:
+            for frame in update.frames:
+                talk.hear(frame.frame)

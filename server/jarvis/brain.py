@@ -267,7 +267,7 @@ class Brain:
                 return out
             if name == "server_send_file":
                 return await self._send_server_file(args["path"], session)
-            if name in ("tg_call", "tg_send"):
+            if name in ("tg_call", "tg_send", "tg_profile"):
                 return {"text": await self._telegram(name, args, session)}
             if name == "browser_screenshot":
                 await session.send_file("page.png", await self.browser.screenshot())
@@ -278,13 +278,14 @@ class Brain:
         except Exception as e:
             return {"text": f"Ошибка: {type(e).__name__}: {e}"}
 
-    @staticmethod
-    async def _send_server_file(path: str, session: Session) -> dict:
+    async def _send_server_file(self, path: str, session: Session) -> dict:
         path = os.path.join(shell.WORK, os.path.expanduser(path))
         if not os.path.isfile(path):
             return {"text": f"Ошибка: на сервере нет файла {path}."}
-        if os.path.getsize(path) > 50 * 1024 * 1024:
-            return {"text": "Ошибка: файл больше 50 МБ, Telegram-бот такие не отправляет. Сожми или разбей."}
+        # The own account sends up to 2 GB, the bot only 50 MB; the file is read into memory, so 1 GB at most
+        limit_mb = 1000 if self.tg and self.tg.ready else 50
+        if os.path.getsize(path) > limit_mb * 1024 * 1024:
+            return {"text": f"Ошибка: файл больше {limit_mb} МБ, так не отправить. Сожми или разбей."}
         with open(path, "rb") as f:
             await session.send_file(os.path.basename(path), f.read())
         return {"text": f"Отправил {os.path.basename(path)}."}
@@ -305,6 +306,11 @@ class Brain:
                 return "Ошибка: звонки в Telegram не работают. Используй phone_call."
             answered = await self.tg.call_owner(args["text"])
             return "Дозвонился и сказал, разговор идёт в звонке." if answered else "Не взял трубку."
+        if name == "tg_profile":
+            change = ", ".join(f"{k}: {v}" for k, v in args.items() if v)
+            if not await session.confirm(f"Поменять мой профиль в Telegram? {change}"):
+                return "Ошибка: пользователь отклонил."
+            return await self.tg.set_profile(args.get("username", ""), args.get("first_name", ""), args.get("about", ""))
         if not await session.confirm(f"Написать от моего аккаунта {args['to']}?\n\n{args['text']}"):
             return "Ошибка: пользователь отклонил отправку."
         return await self.tg.send_to(args["to"], args["text"])

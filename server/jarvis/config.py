@@ -40,9 +40,11 @@ class Config:
     tg_api_id: int
     tg_api_hash: str
     tg_session: str
-    # Everyone except the owner talks to Gemini; empty key means strangers get no reply
+    # Gemini (free): everyday chat with the owner, everyone else, and calls; empty key means Claude does it all
     gemini_key: str
-    gemini_model: str
+    gemini_model: str  # comma-separated chain: the next one answers when the first is overloaded
+    live_model: str  # same, for calls (Gemini Live: listens and speaks itself)
+    live_voice: str
     owner_name: str
     # Strangers: replies per person per hour, replies in total per day, minutes per call
     stranger_hourly: int
@@ -53,7 +55,8 @@ class Config:
 def load() -> Config:
     return Config(
         owner_id=int(os.environ["OWNER_TG_ID"]),
-        bot_token=os.environ["TG_BOT_TOKEN"],
+        # Optional since Jarvis has its own account; empty means no bot at all
+        bot_token=os.environ.get("TG_BOT_TOKEN", ""),
         anthropic_key=os.environ["ANTHROPIC_API_KEY"],
         model=os.environ.get("JARVIS_MODEL", "claude-haiku-5-5"),
         smart_model=os.environ.get("JARVIS_SMART_MODEL", "claude-sonnet-5-5"),
@@ -79,9 +82,11 @@ def load() -> Config:
         tg_api_hash=os.environ.get("TG_API_HASH", ""),
         tg_session=os.environ.get("TG_SESSION", "/opt/jarvis/data/tg_user"),
         gemini_key=os.environ.get("GEMINI_API_KEY", ""),
-        gemini_model=os.environ.get("GEMINI_MODEL", "gemini-flash-latest"),
+        gemini_model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash,gemini-3.5-flash-lite"),
+        live_model=os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.8-live,gemini-3.1-flash-live-preview"),
+        live_voice=os.environ.get("GEMINI_LIVE_VOICE", "Charon"),
         owner_name=os.environ.get("OWNER_NAME", ""),
         stranger_hourly=int(os.environ.get("STRANGER_HOURLY", "20")),
         stranger_daily=int(os.environ.get("STRANGER_DAILY", "300")),
-        call_minutes=int(os.environ.get("CALL_MINUTES", "20")),
+        call_minutes=int(os.environ.get("CALL_MINUTES", "10")),
     )

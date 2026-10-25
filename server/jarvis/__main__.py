@@ -10,22 +10,24 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from . import config, phone, tg_user, voice, watchers
+from . import calls, config, phone, tg_user, voice, watchers
 from .brain import INBOX, Brain, Session
-from .gemini import Strangers
+from .front import Front
+from .gemini import Gemini, Strangers
 from .hub import Hub
 from .memory import Memory
-from .transport import BotChat, file_request
+from .transport import BotChat, LogChat, file_request
 
 log = logging.getLogger("jarvis")
 
 BILLING = "https://console.anthropic.com/settings/billing"
 BUSY = "Я ещё занят прошлой задачей. /stop — прервать её."
 CALL_MARK = "[голосом в звонке] "
+CALL_WORK_SECONDS = 90
 HELP = ("Джарвис на связи. Пиши текстом или голосом, присылай фото и файлы, звони в Telegram.\n"
         "Работаю на сервере 24/7, ноутбук нужен только для дел на нём.\n"
         "/stop прервать · /status ноутбук и Telegram · /cost расход · /memory что помню · "
-        "/watchers наблюдатели · /calltest позвонить в Telegram · /phonetest проверить SMS "
+        "/watchers наблюдатели (/unwatch 3 — удалить) · /calltest позвонить в Telegram · /phonetest проверить SMS "
         "(/phonetest call — звонок робота) · /voice голосовые ответы вкл/выкл · /reset забыть разговор")
 
 
@@ -37,10 +39,13 @@ async def main() -> None:
     hub = Hub(cfg.hands_token)
     await hub.start(cfg.hands_host, cfg.hands_port)
     brain = Brain(cfg, memory, hub)
-    account = tg_user.UserAccount(cfg, Strangers(cfg, memory), INBOX)
+    gemini = Gemini(cfg)
+    front = Front(brain, gemini)
+    account = tg_user.UserAccount(cfg, Strangers(cfg, memory, gemini), gemini, INBOX)
     background: set[asyncio.Task] = set()  # keeps fire-and-forget tasks from being garbage collected
-    bot = Bot(cfg.bot_token)
-    bot_chat = BotChat(bot, cfg.owner_id)
+    # The bot is optional now: with no token everything goes through Jarvis's own account
+    bot = Bot(cfg.bot_token) if cfg.bot_token else None
+    bot_chat = BotChat(bot, cfg.owner_id) if bot else LogChat(log)
     dp = Dispatcher()
     # Strangers get no reply at all
     dp.message.filter(F.from_user.id == cfg.owner_id)
@@ -79,11 +84,13 @@ async def main() -> None:
     def busy() -> bool:
         return bool(state["task"] and not state["task"].done())
 
-    async def run_brain(chat, text: str, images: list[str] | None = None, wait: float = 0) -> str | None:
-        """One request through the brain; progress and confirmations go to this chat.
+    async def run_brain(chat, text: str, images: list[str] | None = None, wait: float = 0,
+                        direct: bool = False) -> str | None:
+        """One request: free Gemini first, the Claude brain for real work (direct: the brain at once).
+        Progress and confirmations go to this chat.
 
-        None when the brain is still busy after waiting up to wait seconds. The check and
-        the start happen with no await in between.
+        None when still busy after waiting up to wait seconds. The check and the start happen
+        with no await in between.
         """
         for _ in range(int(wait * 2)):
             if not busy():
@@ -92,7 +99,7 @@ async def main() -> None:
         if busy():
             return None
         session = make_session(chat)
-        state["task"] = asyncio.create_task(brain.reply(text, session, images))
+        state["task"] = asyncio.create_task((brain if direct else front).reply(text, session, images))
         await chat.typing()
         try:
             answer = await state["task"]
@@ -148,15 +155,25 @@ async def main() -> None:
         await send_long(chat, answer, quiet=True)
         return answer
 
-    async def call_reply(text: str) -> str:
-        """The owner said something in a Telegram call: the brain answers, the chat keeps a quiet copy."""
+    async def call_tool(name: str, args: dict) -> str:
+        """A function Gemini Live calls during the owner's call; real work goes to the brain."""
         chat = owner_chat()
-        await chat.say(f"📞 Ты: {text}"[:4000], quiet=True)
-        answer = await run_brain(chat, CALL_MARK + text, wait=60)
+        if name != "delegate":
+            return await front.run_tool(name, args, make_session(chat))
+        task = asyncio.create_task(run_brain(chat, CALL_MARK + str(args.get("task", "")), wait=20, direct=True))
+        done, _ = await asyncio.wait({task}, timeout=CALL_WORK_SECONDS)
+        if not done:
+            # The talk cannot wait that long: the answer comes to the chat when ready
+            task.add_done_callback(lambda t: t.cancelled() or spawn(send_long(chat, "📞 " + (t.result() or BUSY))))
+            return "Задача ещё выполняется, результат придёт в чат."
+        answer = task.result()
         if answer is None:
-            return "Я ещё занят прошлой задачей. Напиши «стоп» в чате, если её надо прервать."
+            return "Я ещё занят прошлой задачей. Её можно прервать командой /stop в чате."
         await send_long(chat, "📞 " + answer, quiet=True)
         return answer
+
+    def owner_persona(cue: str) -> calls.Persona:
+        return calls.Persona(front.system(call=True), cue, front.call_tools(), call_tool)
 
     def stop_task() -> bool:
         task = state["task"]
@@ -189,7 +206,7 @@ async def main() -> None:
         acks[key] = heard = asyncio.Event()
         chat = owner_chat()
         msg = None
-        if chat is bot_chat:
+        if isinstance(chat, BotChat):
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Принял", callback_data=f"ack:{key}")]])
             msg = await bot.send_message(cfg.owner_id, "🚨 " + text[:3500], reply_markup=kb)
         else:
@@ -250,7 +267,9 @@ async def main() -> None:
 
     async def cmd_cost(_: str) -> str:
         used, rub = memory.phone_since(config.day_start())
-        return (f"Сегодня: ${brain.spent_today():.4f} из ${cfg.daily_limit:.2f} (обнуляется в полночь по Москве)\n"
+        return (f"Claude сегодня: ${brain.spent_today():.4f} из ${cfg.daily_limit:.2f} (обнуляется в полночь по Москве)\n"
+                "Разговор, поиск, напоминания и звонки идут через Gemini: бесплатно. Claude — только для работы "
+                "на ноутбуке и сервере или по слову «подумай».\n"
                 f"Всего: ${memory.spent_since(0):.4f}\n"
                 f"SMS и звонки сегодня: {used} из {cfg.phone_daily_limit}, {rub:.2f} ₽\n"
                 f"Ответов чужим через Gemini сегодня: {memory.peer_replies_since(config.day_start())} "
@@ -261,8 +280,10 @@ async def main() -> None:
             tg = "на связи, звонки " + ("работают" if account.calls else "не работают")
         else:
             tg = "не подключён" + ("" if cfg.tg_api_id else " (нет TG_API_ID)")
-        gemini = "подключён" if account.strangers.ready else "не подключён (нет GEMINI_API_KEY): чужим не отвечаю"
-        return f"Ноутбук: {'на связи' if hub.online else 'не подключён'}\nСвой Telegram: {tg}\nGemini для чужих: {gemini}"
+        state_of_gemini = ("подключён: бесплатный чат, чужие, звонки" if gemini.ready
+                           else "не подключён (нет GEMINI_API_KEY): всё делает платный Claude, чужим не отвечаю, звонков нет")
+        return (f"Ноутбук: {'на связи' if hub.online else 'не подключён'}\nСвой Telegram: {tg}\n"
+                f"Gemini: {state_of_gemini}")
 
     async def cmd_memory(_: str) -> str:
         return "\n".join(f"#{i}: {t}" for i, t in memory.facts()) or "Пока ничего не запомнил."
@@ -286,11 +307,18 @@ async def main() -> None:
             return ("Наблюдателей нет. Скажи, например: «скажи, когда закончится загрузка» "
                     "или «каждое утро в 8 присылай погоду».")
         return "\n".join(f"#{i} {watchers.describe(spec)}" + (f"\n   ⚠️ {st['error']}" if st.get("error") else "")
-                         for i, spec, st, _ in rows)
+                         for i, spec, st, _ in rows) + f"\n\nУдалить: /unwatch {rows[0][0]}"
+
+    async def cmd_unwatch(text: str) -> str:
+        """A user account has no buttons: watchers are removed by number."""
+        number = text.split(maxsplit=1)[1].strip().lstrip("#") if len(text.split()) > 1 else ""
+        if not number.isdigit():
+            return "Напиши номер: /unwatch 3. Номера покажет /watchers."
+        return f"Удалил #{number}." if memory.remove_watcher(int(number)) else f"Наблюдателя #{number} нет."
 
     commands = {"start": cmd_help, "help": cmd_help, "stop": cmd_stop, "reset": cmd_reset, "cost": cmd_cost,
                 "status": cmd_status, "memory": cmd_memory, "voice": cmd_voice, "phonetest": cmd_phonetest,
-                "calltest": cmd_calltest, "watchers": cmd_watchers}
+                "calltest": cmd_calltest, "watchers": cmd_watchers, "unwatch": cmd_unwatch}
 
     def command_of(text: str):
         words = text[1:].split(maxsplit=1) if text.startswith("/") else []
@@ -394,18 +422,25 @@ async def main() -> None:
     async def tell_owner(text: str) -> None:
         await send_long(owner_chat(), text)
 
-    account.on_owner, account.owner_reply = handle_owner, call_reply
-    account.tell_owner, account.on_owner_seen = tell_owner, owner_seen
-    try:
-        await account.start()
-    except Exception:
-        log.exception("own Telegram account failed to start, staying on the bot")
     asyncio.create_task(reminders_loop())
     brain.notify, brain.tg = on_event, account
     hub.on_ask, hub.on_stop, hub.on_notice = ask_from_laptop, stop_task, laptop_notice
     asyncio.create_task(watchers.Watchers(memory, hub, on_event).loop())
-    log.info("starting, model=%s smart=%s", cfg.model, cfg.smart_model)
-    await dp.start_polling(bot)
+    account.on_owner, account.owner_persona = handle_owner, owner_persona
+    account.tell_owner, account.on_owner_seen = tell_owner, owner_seen
+    try:
+        await account.start()
+    except Exception:
+        log.exception("own Telegram account failed to start")
+    log.info("starting, model=%s smart=%s, bot %s", cfg.model, cfg.smart_model, "on" if bot else "off")
+    if bot:
+        await dp.start_polling(bot)
+    elif account.ready:
+        await account.client.disconnected
+        raise SystemExit("own Telegram account disconnected")  # systemd starts Jarvis again
+    else:
+        log.error("no Telegram at all: no bot token and the own account is not logged in")
+        await asyncio.Event().wait()  # the laptop's voice still reaches the brain through the hub
 
 
 if __name__ == "__main__":

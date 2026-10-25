@@ -99,6 +99,34 @@ class BotChat:
                 fut.set_result(False)
 
 
+class LogChat:
+    """No Telegram at all (no bot, account not logged in): what would be sent goes to the log."""
+
+    def __init__(self, log):
+        self.log = log
+
+    async def say(self, text: str, quiet: bool = False):
+        self.log.warning("nowhere to send: %s", text[:500])
+
+    async def edit(self, msg, text: str) -> None:
+        pass
+
+    async def delete(self, msg) -> None:
+        pass
+
+    async def typing(self) -> None:
+        pass
+
+    async def send_file(self, name: str, data: bytes) -> None:
+        self.log.warning("nowhere to send file %s", name)
+
+    async def send_voice(self, path: str) -> None:
+        pass
+
+    async def confirm(self, question: str) -> bool:
+        return False
+
+
 class UserChat:
     """The owner's private chat with Jarvis's own account (Telethon)."""
 

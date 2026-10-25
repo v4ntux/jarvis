@@ -1,10 +1,9 @@
 """Jarvis's own Telegram account (Telethon).
 
-The owner talks to the brain here just like in the bot; everyone else talks to Gemini
-and never reaches the brain, the tools or the laptop. Both can call: the owner's calls
-go to the brain, everyone else's to Gemini. Groups, channels and bots are ignored.
+The owner talks to Jarvis here (free Gemini first, the Claude brain for real work); everyone
+else talks to Gemini alone and never reaches the brain, the tools, the laptop or anything
+Jarvis knows about the owner. Calls go through Gemini Live. Groups, channels and bots are ignored.
 """
-import asyncio
 import base64
 import logging
 import os
@@ -15,23 +14,35 @@ from telethon import TelegramClient, events
 
 from . import calls, voice
 from .config import Config
-from .gemini import GeminiError, Strangers
+from .gemini import Gemini, GeminiError, Strangers
 from .transport import UserChat
 
 log = logging.getLogger("jarvis.tg")
 
 SERVICE = 777000  # Telegram's own notices, login codes among them: never answered or passed anywhere
 MAX_FILE = 200 * 1024 * 1024
+MAX_STRANGER_VOICE = 120  # seconds: longer voice messages from strangers are not worth the quota
 PHONE = re.compile(r"^\+?\d[\d\s()-]{8,}$")
-STRANGER_OPENER = "Здравствуйте, это Джарвис, ИИ-ассистент. Слушаю вас."
 
-# The owner's message for the brain: (chat, text, images, spoken, file path)
+STRANGER_CALL = """
+
+Сейчас ты говоришь с этим человеком по телефону, голосом: 1–2 короткие фразы, без списков и смайликов.
+Если он просит что-то передать владельцу или говорит что-то важное для него — pass_to_owner. Когда попрощались — hang_up."""
+STRANGER_TOOLS = [
+    {"name": "pass_to_owner", "description": "Передать владельцу короткую записку: кто звонил и что просил.",
+     "parameters": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}},
+    {"name": "hang_up", "description": "Положить трубку: когда попрощались или разговор закончен."},
+]
+
+# The owner's message: (chat, text, images, spoken, file path)
 OwnerHandler = Callable[[UserChat, str, list[str] | None, bool, str | None], Awaitable[None]]
 
 
 def make_client(cfg: Config) -> TelegramClient:
+    # Jarvis lives here 24/7 with no bot to fall back on: keep reconnecting however long the outage is
     return TelegramClient(cfg.tg_session, cfg.tg_api_id, cfg.tg_api_hash, device_model="Jarvis Server",
-                          system_version="Ubuntu", app_version="3.0", lang_code="ru", system_lang_code="ru-RU")
+                          system_version="Ubuntu", app_version="3.0", lang_code="ru", system_lang_code="ru-RU",
+                          connection_retries=-1, retry_delay=5)
 
 
 def display(user) -> str:
@@ -43,15 +54,15 @@ def display(user) -> str:
 
 
 class UserAccount:
-    def __init__(self, cfg: Config, strangers: Strangers, inbox: str):
-        self.cfg, self.strangers, self.inbox = cfg, strangers, inbox
+    def __init__(self, cfg: Config, strangers: Strangers, gemini: Gemini, inbox: str):
+        self.cfg, self.strangers, self.gemini, self.inbox = cfg, strangers, gemini, inbox
         self.client: TelegramClient | None = None  # Telethon refuses an empty api_id, so it is made in start()
         self.calls: calls.Calls | None = None
         self.owner: UserChat | None = None
         self.ready = False
-        # Set by the bot: messages for the brain, the brain's answers in a call, notes for the owner
+        # Set by the bot: the owner's messages, how Jarvis is in the owner's calls (given the first cue), notes
         self.on_owner: OwnerHandler | None = None
-        self.owner_reply: calls.Reply | None = None
+        self.owner_persona: Callable[[str], calls.Persona] | None = None
         self.tell_owner: Callable[[str], Awaitable[None]] | None = None
         # Set by the bot: any word from the owner here counts as «Принял» for a running alarm
         self.on_owner_seen: Callable[[], None] | None = None
@@ -71,15 +82,17 @@ class UserAccount:
         self.client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
         if not await self._reach_owner():
             log.warning("cannot reach the owner yet: they should write to %s first", display(me))
-        try:
-            self.calls = calls.Calls(self.client, self._choose, self._call_ended, self.cfg.call_minutes)
-            await self.calls.start()
-        except Exception:
-            log.exception("calls are off")
-            self.calls = None
+        if self.gemini.ready:  # calls are Gemini Live: no key, no calls
+            try:
+                self.calls = calls.Calls(self.client, self.cfg.gemini_key, self.cfg.live_model, self.cfg.live_voice,
+                                         self._choose, self._call_ended, self.cfg.call_minutes)
+                await self.calls.start()
+            except Exception:
+                log.exception("calls are off")
+                self.calls = None
         self.ready = True
         log.info("own account %s is up, calls %s, Gemini %s", display(me), "on" if self.calls else "off",
-                 "on" if self.strangers.ready else "off")
+                 "on" if self.gemini.ready else "off")
         return True
 
     async def _reach_owner(self) -> bool:
@@ -105,6 +118,7 @@ class UserAccount:
     # Messages
 
     async def _on_message(self, event) -> None:
+        # Who is who comes from Telegram's sender id, which nobody can fake; message text never decides it
         if not event.is_private:
             return
         try:
@@ -153,18 +167,22 @@ class UserAccount:
 
     async def _from_stranger(self, event, sender) -> None:
         m, peer, name = event.message, event.sender_id, display(sender)
+        if not self.strangers.allowed(peer):
+            return  # over the caps: silence, and no note for the owner either
         text, spoken = m.raw_text or "", False
         if m.voice or m.video_note:
-            heard = await self._hear(m)
-            if not heard:
-                return
-            text, spoken = heard + (f"\n{text}" if text else ""), True
+            if (m.file.duration or 0) > MAX_STRANGER_VOICE:
+                text = "[прислал длинное голосовое, больше двух минут]" + (f" {text}" if text else "")
+            else:
+                heard = await self._hear(m)
+                if not heard:
+                    return
+                text, spoken = heard + (f"\n{text}" if text else ""), True
         elif m.media:
             text = "[прислал вложение]" + (f" {text}" if text else "")
         if not text.strip():
             return
-        new = self.strangers.is_new(peer)
-        if new and self.tell_owner:
+        if self.strangers.is_new(peer) and self.tell_owner:
             await self.tell_owner(f"👤 Мне впервые написал {name}:\n{text[:500]}")
         await self.client.send_read_acknowledge(peer, m)
         try:
@@ -172,6 +190,7 @@ class UserAccount:
                 out = await self.strangers.reply(peer, name, text)
         except GeminiError as e:
             log.warning("Gemini failed for %s: %s", peer, e)
+            await self.client.send_message(peer, "Секунду, я сейчас перегружен. Напишите ещё раз чуть позже.")
             return
         if out is None:
             return
@@ -184,13 +203,20 @@ class UserAccount:
             await self.tell_owner(f"📨 {name} просит передать:\n{note}")
 
     async def _hear(self, m) -> str:
+        """Gemini understands speech best; Whisper on the server's CPU is the fallback."""
+        data = await m.download_media(file=bytes)
+        if self.gemini.ready:
+            try:
+                return await self.gemini.transcribe(data, m.file.mime_type or "audio/ogg")
+            except GeminiError as e:
+                log.warning("Gemini transcription failed, Whisper instead: %s", e)
         path = os.path.join(self.inbox, f"tg_voice_{m.chat_id}_{m.id}.ogg")
-        await m.download_media(file=path)
+        with open(path, "wb") as f:
+            f.write(data)
         try:
             return await voice.transcribe(path)
         finally:
-            if os.path.exists(path):
-                os.unlink(path)
+            os.unlink(path)
 
     async def _send_voice(self, peer: int, text: str) -> None:
         path = await voice.synthesize(text)
@@ -222,44 +248,69 @@ class UserAccount:
         self.strangers.memory.add_peer(user.id, display(user), "model", text)
         return f"Отправил: {display(user)}."
 
+    async def set_profile(self, username: str = "", first_name: str = "", about: str = "") -> str:
+        from telethon.errors import RPCError
+        from telethon.tl.functions.account import UpdateProfileRequest, UpdateUsernameRequest
+
+        done = []
+        try:
+            if username:
+                await self.client(UpdateUsernameRequest(username.lstrip("@")))
+                done.append(f"username @{username.lstrip('@')}")
+            if first_name or about:
+                await self.client(UpdateProfileRequest(first_name=first_name or None, about=about or None))
+                done += [f"имя {first_name}"] * bool(first_name) + [f"описание «{about}»"] * bool(about)
+        except RPCError as e:
+            return "Ошибка: Telegram не дал: " + str(e)
+        return "Поменял: " + ", ".join(done) if done else "Ошибка: нечего менять."
+
     # Calls
 
     async def call_owner(self, text: str) -> bool:
         """Rings the owner in Telegram and says text; True when they picked up."""
-        if not (self.ready and self.calls and self.owner_reply):
+        if not (self.ready and self.calls and self.owner_persona):
             return False
-        return await self.calls.call(self.cfg.owner_id, text, self.owner_reply)
+        cue = f"Ты сам позвонил пользователю. Скажи ему: {text}"
+        return await self.calls.call(self.cfg.owner_id, self.owner_persona(cue))
 
-    def _choose(self, peer: int) -> tuple[calls.Reply, str] | None:
+    def _choose(self, peer: int) -> calls.Persona | None:
         if peer == self.cfg.owner_id:
-            return (self.owner_reply, "Слушаю.") if self.owner_reply else None
+            if not self.owner_persona:
+                return None
+            return self.owner_persona("Пользователь позвонил тебе. Поздоровайся одним-двумя словами, например «Слушаю».")
         if peer == SERVICE or not self.strangers.ready or not self.strangers.allowed(peer):
             return None
-        return self._stranger_reply(peer), STRANGER_OPENER
 
-    def _stranger_reply(self, peer: int) -> calls.Reply:
-        async def reply(text: str) -> str:
-            try:
-                out = await self.strangers.reply(peer, await self.name_of(peer), text, spoken=True)
-            except GeminiError as e:
-                log.warning("Gemini failed in a call with %s: %s", peer, e)
-                return "Извините, связь с мозгом пропала. Напишите мне текстом."
-            if out is None:
-                return "Извините, на сегодня я наговорился. Напишите мне позже."
-            answer, note = out
-            if note:
-                self.call_notes.setdefault(peer, []).append(note)
-            return answer
-        return reply
+        async def run_tool(name: str, args: dict) -> str:
+            if name != "pass_to_owner":
+                return "Ошибка: этого ты не можешь."
+            self.call_notes.setdefault(peer, []).append(str(args.get("note", ""))[:500])
+            return "Передам."
 
-    async def _call_ended(self, peer: int, talk: calls.Conversation) -> None:
-        if peer == self.cfg.owner_id or not self.tell_owner:
+        return calls.Persona(self.strangers.persona() + STRANGER_CALL,
+                             "Тебе позвонил человек. Поздоровайся: ты Джарвис, ИИ-ассистент; спроси, чем помочь.",
+                             STRANGER_TOOLS, run_tool)
+
+    async def _call_ended(self, peer: int, talk: calls.LiveTalk) -> None:
+        lines = "\n".join(f"{'Ты' if peer == self.cfg.owner_id else 'Он'}: {t}" if who == "them" else f"Я: {t}"
+                          for who, t in talk.transcript)
+        minutes = max(1, round(talk.minutes))
+        if not self.tell_owner:
             return
+        if peer == self.cfg.owner_id:
+            if lines:
+                await self.owner.say(f"📞 Звонок, {minutes} мин:\n{lines}"[:4000], quiet=True)
+            return
+        name = await self.name_of(peer)
+        # A call counts against the same caps as messages, and shows up in tg_chats
         said = " / ".join(t for who, t in talk.transcript if who == "them")
+        self.strangers.memory.add_peer(peer, name, "user", f"[звонок] {said}"[:4000])
+        self.strangers.memory.add_peer(peer, name, "model", "[звонок] " + " / ".join(
+            t for who, t in talk.transcript if who == "jarvis")[:4000])
         notes = self.call_notes.pop(peer, [])
-        text = f"📞 Мне звонил {await self.name_of(peer)}, {max(1, round(talk.minutes))} мин."
-        if said:
-            text += f"\nГоворил: {said[:1000]}"
+        text = f"📞 Мне звонил {name}, {minutes} мин."
+        if lines:
+            text += f"\n{lines[:1500]}"
         if notes:
             text += "\n📨 Просил передать: " + "; ".join(notes)
         await self.tell_owner(text)
