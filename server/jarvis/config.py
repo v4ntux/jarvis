@@ -82,7 +82,8 @@ def load() -> Config:
         tg_api_hash=os.environ.get("TG_API_HASH", ""),
         tg_session=os.environ.get("TG_SESSION", "/opt/jarvis/data/tg_user"),
         gemini_key=os.environ.get("GEMINI_API_KEY", ""),
-        gemini_model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash,gemini-3.5-flash-lite"),
+        # The free tier gives gemini-3.6-flash only 20 requests a day; the lite ones carry the rest
+        gemini_model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite"),
         live_model=os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.8-live,gemini-3.1-flash-live-preview"),
         live_voice=os.environ.get("GEMINI_LIVE_VOICE", "Charon"),
         owner_name=os.environ.get("OWNER_NAME", ""),

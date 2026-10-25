@@ -5,6 +5,8 @@ else talks to Gemini alone and never reaches the brain, the tools, the laptop or
 Jarvis knows about the owner. Calls go through Gemini Live. Groups, channels and bots are ignored.
 """
 import base64
+import collections
+import io
 import logging
 import os
 import re
@@ -15,13 +17,14 @@ from telethon import TelegramClient, events
 from . import calls, voice
 from .config import Config
 from .gemini import Gemini, GeminiError, Strangers
-from .transport import UserChat
+from .transport import IMAGE_EXT, UserChat
 
 log = logging.getLogger("jarvis.tg")
 
 SERVICE = 777000  # Telegram's own notices, login codes among them: never answered or passed anywhere
 MAX_FILE = 200 * 1024 * 1024
 MAX_STRANGER_VOICE = 120  # seconds: longer voice messages from strangers are not worth the quota
+MAX_ALBUM_IMAGES = 6  # the model looks at this many pictures of an album; all of them are saved
 PHONE = re.compile(r"^\+?\d[\d\s()-]{8,}$")
 
 STRANGER_CALL = """
@@ -45,6 +48,27 @@ def make_client(cfg: Config) -> TelegramClient:
                           connection_retries=-1, retry_delay=5)
 
 
+TRANSLIT = str.maketrans({"а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh", "з": "z",
+                          "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+                          "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh",
+                          "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya"})
+
+
+def _name_words(text: str) -> list[str]:
+    """Latin letters, endings cut: «Сардору», «Sardor» and «сардор» all become «sardor»."""
+    latin = text.lower().translate(TRANSLIT).replace("kh", "h")
+    return [re.sub(r"(?<=\w{3})[aeiouy]+$", "", w) for w in re.findall(r"[a-z0-9]+", latin)]
+
+
+def name_matches(query: str, user) -> bool:
+    """Every word asked for is the start of one of the person's names (first, last, username)."""
+    wanted = _name_words(query)
+    have = _name_words(" ".join(p for p in (getattr(user, "first_name", None), getattr(user, "last_name", None),
+                                            getattr(user, "username", None)) if p))
+    # Short words must match whole: «Сар» should not quietly become Сардор
+    return bool(wanted) and all(any(h == w or (len(w) >= 4 and h.startswith(w)) for h in have) for w in wanted)
+
+
 def display(user) -> str:
     name = " ".join(p for p in (getattr(user, "first_name", None), getattr(user, "last_name", None)) if p)
     name = name or getattr(user, "title", None) or "без имени"
@@ -54,6 +78,8 @@ def display(user) -> str:
 
 
 class UserAccount:
+    display = staticmethod(display)
+
     def __init__(self, cfg: Config, strangers: Strangers, gemini: Gemini, inbox: str):
         self.cfg, self.strangers, self.gemini, self.inbox = cfg, strangers, gemini, inbox
         self.client: TelegramClient | None = None  # Telethon refuses an empty api_id, so it is made in start()
@@ -67,6 +93,7 @@ class UserAccount:
         # Set by the bot: any word from the owner here counts as «Принял» for a running alarm
         self.on_owner_seen: Callable[[], None] | None = None
         self.call_notes: dict[int, list[str]] = {}
+        self._albums_seen: collections.deque = collections.deque(maxlen=200)
 
     async def start(self) -> bool:
         if not self.cfg.tg_api_id or not self.cfg.tg_api_hash:
@@ -80,6 +107,7 @@ class UserAccount:
         me = await self.client.get_me()
         self.owner = UserChat(self.client, self.cfg.owner_id)
         self.client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
+        self.client.add_event_handler(self._on_album, events.Album())
         if not await self._reach_owner():
             log.warning("cannot reach the owner yet: they should write to %s first", display(me))
         if self.gemini.ready:  # calls are Gemini Live: no key, no calls
@@ -136,6 +164,8 @@ class UserAccount:
         text = m.raw_text or ""
         if self.on_owner_seen:
             self.on_owner_seen()
+        if m.grouped_id:
+            return  # part of an album: _on_album takes all of it at once
         if self.owner.answer(text):
             return
         if m.sticker or m.gif:
@@ -165,10 +195,40 @@ class UserAccount:
         elif text:
             await self.on_owner(self.owner, text, None, False, None)
 
+    async def _on_album(self, event) -> None:
+        """Several photos or files sent at once by the owner: one request with all of them."""
+        if not event.is_private or event.sender_id != self.cfg.owner_id:
+            return
+        try:
+            names, images = [], []
+            for m in event.messages:
+                if m.photo:
+                    name = f"photo_{m.id}.jpg"
+                    data = await m.download_media(file=bytes)
+                    with open(os.path.join(self.inbox, name), "wb") as f:
+                        f.write(data)
+                    images.append(base64.b64encode(data).decode())
+                elif m.document and (m.file.size or 0) <= MAX_FILE:
+                    name = os.path.basename(m.file.name or f"file_{m.id}{m.file.ext or ''}")
+                    await m.download_media(file=os.path.join(self.inbox, name))
+                else:
+                    continue
+                names.append(name)
+            if names:
+                text = (event.text or ("Что на фото?" if images else "Посмотри файлы.")) + \
+                       f"\n[сохранено в inbox: {', '.join(names)}]"
+                await self.on_owner(self.owner, text, images[:MAX_ALBUM_IMAGES] or None, False, None)
+        except Exception:
+            log.exception("album from the owner failed")
+
     async def _from_stranger(self, event, sender) -> None:
         m, peer, name = event.message, event.sender_id, display(sender)
         if not self.strangers.allowed(peer):
             return  # over the caps: silence, and no note for the owner either
+        if m.grouped_id:
+            if m.grouped_id in self._albums_seen:
+                return  # one answer per album, not one per picture
+            self._albums_seen.append(m.grouped_id)
         text, spoken = m.raw_text or "", False
         if m.voice or m.video_note:
             if (m.file.duration or 0) > MAX_STRANGER_VOICE:
@@ -231,22 +291,65 @@ class UserAccount:
         except Exception:
             return f"id {peer}"
 
-    async def send_to(self, to: str, text: str) -> str:
-        """A message from Jarvis's account to someone the owner named: @username, link or phone number."""
+    async def find_user(self, to: str):
+        """The person the owner named: @username or t.me link, +phone, numeric id, or a name from Jarvis's own
+        chats and contacts. Returns the user, or what went wrong as text.
+
+        A bare word is only ever a name: taking it for a username could reach a random stranger.
+        """
         to = to.strip()
-        if PHONE.match(to):
-            user = await self._import_phone(to, to)
-            if user is None:
-                return f"Ошибка: в Telegram нет пользователя с номером {to} (или он скрыл себя от поиска по номеру)."
-        else:
+        if to.startswith("@") or "t.me/" in to:
             try:
-                user = await self.client.get_entity(to)
+                return await self.client.get_entity(to)
             except (ValueError, TypeError) as e:
                 return f"Ошибка: не нашёл {to}: {e}"
-        await self.client.send_message(user, text, parse_mode=None, link_preview=False)
-        # Gemini sees what Jarvis wrote first, so the reply lands in context
-        self.strangers.memory.add_peer(user.id, display(user), "model", text)
-        return f"Отправил: {display(user)}."
+        if to.isdigit():
+            try:
+                return await self.client.get_entity(int(to))
+            except (ValueError, TypeError):
+                pass  # not someone Jarvis has met: maybe a phone number
+        if PHONE.match(to):
+            user = await self._import_phone(to, to)
+            return user or f"Ошибка: в Telegram нет пользователя с номером {to} (или он скрыл себя от поиска по номеру)."
+        return await self._by_name(to)
+
+    async def _by_name(self, name: str):
+        from telethon.tl.functions.contacts import GetContactsRequest
+
+        people = {}
+        async for dialog in self.client.iter_dialogs(limit=300):
+            user = dialog.entity
+            if dialog.is_user and not getattr(user, "bot", False) and not getattr(user, "is_self", False):
+                people[user.id] = user
+        for user in getattr(await self.client(GetContactsRequest(hash=0)), "users", []):
+            people.setdefault(user.id, user)
+        found = [u for u in people.values() if name_matches(name, u)]
+        if len(found) == 1:
+            return found[0]
+        if not found:
+            return f"Ошибка: «{name}» нет среди моих чатов и контактов. Нужен @username или номер телефона."
+        return f"Ошибка: под «{name}» подходят несколько: " + "; ".join(display(u) for u in found[:8]) + ". Уточни, кому."
+
+    async def send_to(self, user, text: str, files: list[tuple[str, bytes]] | None = None) -> str:
+        """A message, photo, album or file from Jarvis's account to a user found by find_user."""
+        if files:
+            sent = []
+            for name, data in files:
+                item = io.BytesIO(data)
+                item.name = name
+                sent.append(item)
+            photos = all(os.path.splitext(n)[1].lower() in IMAGE_EXT for n, _ in files)
+            # Several pictures go as one album; anything else as documents
+            await self.client.send_file(user, sent if len(sent) > 1 else sent[0], caption=text or None,
+                                        parse_mode=None, force_document=not photos)
+            what = (("фото" if photos else "файл") + " " + ", ".join(n for n, _ in files))
+        else:
+            await self.client.send_message(user, text, parse_mode=None, link_preview=False)
+            what = "сообщение"
+        # Gemini sees what Jarvis sent first, so the reply lands in context
+        self.strangers.memory.add_peer(user.id, display(user), "model",
+                                       f"[{what}] {text}".strip() if files else text)
+        return f"Отправил {display(user)}: {what}."
 
     async def set_profile(self, username: str = "", first_name: str = "", about: str = "") -> str:
         from telethon.errors import RPCError

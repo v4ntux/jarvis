@@ -16,6 +16,7 @@ from .config import TZ, Config, day_start
 from .hub import HandsOffline, Hub
 from .memory import Memory
 from .tools import LAPTOP_NAMES, TOOLS
+from .transport import IMAGE_EXT
 
 INBOX = "/opt/jarvis/data/inbox"
 
@@ -33,7 +34,7 @@ SYSTEM = """Ты Джарвис, личный ИИ-помощник как у Т
   или срочно; Telegram в приоритете.
 - Наблюдатели (add_watcher): «скажи/позвони, если…», «когда закончится…», «каждое утро в 8…». Проверяются без ИИ.
 - Свой Telegram-аккаунт (ты сам, не бот): пользователь пишет и звонит тебе туда. tg_call — позвонить пользователю
-  голосом в Telegram (бесплатно), tg_send — написать человеку от своего имени (только по просьбе пользователя).
+  голосом в Telegram (бесплатно), tg_send — написать человеку или отправить ему фото и файлы от своего имени (только по просьбе пользователя).
   Чужим людям, которые пишут или звонят тебе, отвечает помощник на Gemini; их переписки и звонки — tg_chats.
 
 Как работать:
@@ -136,6 +137,10 @@ def _media_type(b64: str) -> str:
 def _short(args: dict) -> str:
     text = json.dumps(args, ensure_ascii=False)
     return text if len(text) <= 120 else text[:117] + "…"
+
+
+def _split_names(file: str) -> list[str]:
+    return [n.strip() for n in re.split(r"[,;\n]", file) if n.strip()]
 
 
 class Brain:
@@ -311,9 +316,52 @@ class Brain:
             if not await session.confirm(f"Поменять мой профиль в Telegram? {change}"):
                 return "Ошибка: пользователь отклонил."
             return await self.tg.set_profile(args.get("username", ""), args.get("first_name", ""), args.get("about", ""))
-        if not await session.confirm(f"Написать от моего аккаунта {args['to']}?\n\n{args['text']}"):
+        text, files = (args.get("text") or "").strip(), []
+        if args.get("file") or args.get("file_from") == "laptop_screen":
+            files = await self._attachments(args.get("file") or "", args.get("file_from") or "inbox")
+            if isinstance(files, str):
+                return files
+        if not text and not files:
+            return "Ошибка: нечего отправлять: нет ни текста, ни файла."
+        user = await self.tg.find_user(args["to"])
+        if isinstance(user, str):
+            return user
+        # The question names the exact person found, not just what the model asked for
+        what = "сообщение"
+        if files:
+            photos = all(os.path.splitext(n)[1].lower() in IMAGE_EXT for n, _ in files)
+            what = ("фото " if photos else "файл ") + ", ".join(n for n, _ in files)
+        if not await session.confirm(f"Отправить от моего аккаунта {self.tg.display(user)}: {what}?"
+                                     + (f"\n\n{text}" if text else "")):
             return "Ошибка: пользователь отклонил отправку."
-        return await self.tg.send_to(args["to"], args["text"])
+        return await self.tg.send_to(user, text, files)
+
+    async def _attachments(self, file: str, source: str) -> list[tuple[str, bytes]] | str:
+        """The files to send to someone, or what went wrong. Several names go comma-separated."""
+        if source in ("laptop", "laptop_screen"):
+            files = []
+            for path in [""] if source == "laptop_screen" else _split_names(file):
+                out = await self.hub.call("send_screen" if source == "laptop_screen" else "send_file",
+                                          {} if source == "laptop_screen" else {"path": path}, timeout=90)
+                if not out.get("file"):
+                    return out.get("text") or f"Ошибка: ноутбук не отдал {path or 'скриншот'}."
+                files.append((out.get("name") or "file", base64.b64decode(out["file"])))
+            return files
+        files = []
+        for name in _split_names(file):
+            base = INBOX if source == "inbox" else shell.WORK
+            path = os.path.realpath(os.path.join(base, os.path.expanduser(name) if source == "server"
+                                                 else os.path.basename(name)))
+            # Only Jarvis's own work and inbox folders go to other people: .env, the session, code stay put
+            if not any(path.startswith(os.path.realpath(d) + os.sep) for d in (INBOX, shell.WORK)):
+                return f"Ошибка: людям можно отправлять только файлы из inbox и {shell.WORK}."
+            if not os.path.isfile(path):
+                return f"Ошибка: нет файла {path}."
+            if os.path.getsize(path) > 1000 * 1024 * 1024:
+                return f"Ошибка: {os.path.basename(path)} больше 1 ГБ."
+            with open(path, "rb") as f:
+                files.append((os.path.basename(path), f.read()))
+        return files or "Ошибка: не указан файл."
 
     async def _server_tool(self, name: str, args: dict) -> str:
         if name == "web_search":

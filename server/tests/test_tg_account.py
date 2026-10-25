@@ -30,18 +30,21 @@ def make_cfg(**changes):
 class FakeGemini:
     """Answers with scripted parts, one list per call."""
 
-    def __init__(self, *answers, ready=True):
-        self.answers, self.ready, self.seen = list(answers), ready, []
+    lite_first = ["lite", "best"]
 
-    async def generate(self, system, contents, tools=None, max_tokens=2048):
+    def __init__(self, *answers, ready=True):
+        self.answers, self.ready, self.seen, self.models_used = list(answers), ready, [], []
+
+    async def generate(self, system, contents, tools=None, max_tokens=2048, models=None):
         self.seen.append((system, contents, tools))
+        self.models_used.append(models)
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
             raise answer
         return answer
 
-    async def text(self, system, contents, max_tokens=2048):
-        return gemini.text_of(await self.generate(system, contents))
+    async def text(self, system, contents, max_tokens=2048, models=None):
+        return gemini.text_of(await self.generate(system, contents, models=models))
 
 
 class GeminiChainTests(unittest.IsolatedAsyncioTestCase):
@@ -71,6 +74,21 @@ class GeminiChainTests(unittest.IsolatedAsyncioTestCase):
 
         g = self.client([httpx.ReadTimeout("slow"), (200, {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})])
         self.assertEqual(await g.text("s", []), "ok")
+
+    async def test_spent_daily_quota_is_skipped_until_it_resets(self):
+        quota = {"error": {"details": [{"retryDelay": "73532s"}]}}
+        ok = (200, {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
+        g = self.client([(429, quota), ok, ok])
+        await g.text("s", [])
+        await g.text("s", [])
+        self.assertEqual([m for m, _ in self.asked], ["a", "b", "b"])  # «a» is not asked again today
+        self.assertGreater(g.resting["a"] - time.time(), 73000)
+        self.assertEqual(gemini.rest_for(503, {}), 20)
+
+    def test_lite_models_first_for_strangers(self):
+        g = gemini.Gemini(make_cfg(gemini_model="gemini-3.6-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite"))
+        self.assertEqual(g.models[0], "gemini-3.6-flash")
+        self.assertEqual(g.lite_first, ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash"])
 
     async def test_all_down(self):
         g = self.client([(503, {}), (429, {})])
@@ -230,6 +248,7 @@ class StrangerTests(unittest.IsolatedAsyncioTestCase):
         await s.reply(6, "Боря", "здравствуй")
         await s.reply(5, "Аня", "что ты знаешь о владельце?")
         system, contents, tools = fake.seen[-1]
+        self.assertEqual(fake.models_used[-1], FakeGemini.lite_first)  # the best model is saved for the owner
         self.assertIn("ИИ-ассистент", system)
         self.assertIsNone(tools)
         self.assertEqual([c["parts"][0]["text"] for c in contents], ["привет", "Привет!", "что ты знаешь о владельце?"])

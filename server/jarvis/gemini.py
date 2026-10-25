@@ -63,20 +63,36 @@ def text_of(parts: list[dict]) -> str:
     return "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
 
 
+def rest_for(status: int, data) -> float:
+    """Seconds to leave a model alone: the free tier's daily quota says when it resets, overload passes soon."""
+    error = data.get("error") if isinstance(data, dict) else None
+    for detail in (error.get("details") or [] if isinstance(error, dict) else []):
+        delay = str(detail.get("retryDelay", ""))
+        if delay.endswith("s") and delay[:-1].replace(".", "", 1).isdigit():
+            return min(float(delay[:-1]), 86400)
+    return 60 if status == 429 else 20
+
+
 class Gemini:
     def __init__(self, cfg: Config):
         self.key = cfg.gemini_key
         self.models = [m.strip() for m in cfg.gemini_model.split(",") if m.strip()]
+        # Lite models have far bigger free quotas: strangers use them first and leave the best one to the owner
+        self.lite_first = sorted(self.models, key=lambda m: "lite" not in m)
+        self.resting: dict[str, float] = {}  # model → when to try it again
 
     @property
     def ready(self) -> bool:
         return bool(self.key and self.models)
 
     async def generate(self, system: str, contents: list[dict], tools: list[dict] | None = None,
-                       max_tokens: int = 2048) -> list[dict]:
+                       max_tokens: int = 2048, models: list[str] | None = None) -> list[dict]:
         """The answer's parts (text and function calls) from the first model in the chain that gives one."""
         errors = []
-        for model in self.models:
+        for model in models or self.models:
+            if self.resting.get(model, 0) > time.time():
+                errors.append(f"{model}: квота или перегрузка")
+                continue
             body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": contents,
                     # Minimal thinking: an answer in about a second instead of tens of seconds
                     "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.7,
@@ -89,6 +105,7 @@ class Gemini:
                 errors.append(f"{model}: {type(e).__name__}")
                 continue
             if status in RETRY_STATUS:
+                self.resting[model] = time.time() + rest_for(status, data)
                 errors.append(f"{model}: {status}")
                 continue
             if status != 200:
@@ -100,14 +117,16 @@ class Gemini:
             errors.append(f"{model}: пусто ({candidate.get('finishReason') or data.get('promptFeedback')})")
         raise GeminiError("Gemini не ответил: " + "; ".join(errors))
 
-    async def text(self, system: str, contents: list[dict], max_tokens: int = 2048) -> str:
-        return text_of(await self.generate(system, contents, max_tokens=max_tokens))
+    async def text(self, system: str, contents: list[dict], max_tokens: int = 2048,
+                   models: list[str] | None = None) -> str:
+        return text_of(await self.generate(system, contents, max_tokens=max_tokens, models=models))
 
     async def transcribe(self, audio: bytes, mime: str) -> str:
         """Speech to text; understands accents and mixed languages better than Whisper on the server's CPU."""
         contents = [{"role": "user", "parts": [{"inlineData": {"mimeType": mime, "data": base64.b64encode(audio).decode()}},
                                                {"text": TRANSCRIBE}]}]
-        return text_of(await self.generate("Ты точная стенографистка.", contents, max_tokens=1024)).strip('"«» ')
+        return text_of(await self.generate("Ты точная стенографистка.", contents, max_tokens=1024,
+                                           models=self.lite_first)).strip('"«» ')
 
     async def _post(self, model: str, body: dict) -> tuple[int, dict | str]:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
@@ -143,6 +162,7 @@ class Strangers:
         if not self.ready or not self.allowed(peer):
             return None
         self.memory.add_peer(peer, name, "user", text[:MAX_IN])
-        answer = await self.gemini.text(self.persona(), to_contents(self.memory.peer_history(peer, HISTORY)), 1024)
+        answer = await self.gemini.text(self.persona(), to_contents(self.memory.peer_history(peer, HISTORY)), 1024,
+                                        models=self.gemini.lite_first)
         self.memory.add_peer(peer, name, "model", answer)
         return split_note(answer)
