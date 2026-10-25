@@ -294,7 +294,7 @@ class BrainLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Ван готовит запуск магазина", stable)
         self.assertIn("мат", stable.lower())
         self.assertIn("мелочи не спрашивай", stable)
-        self.assertIn("UTC+05:00", system[1]["text"])
+        self.assertIn("UTC+03:00", system[1]["text"])
 
     async def test_calls_at_a_time_and_new_words(self):
         session = self.session()

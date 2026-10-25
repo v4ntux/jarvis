@@ -3,9 +3,9 @@ import os
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
-# The owner's clock (UTC+5: his phone showed 15:41 when the server said 10:41 UTC): every «в 18:00», reminder,
-# schedule and the daily limit follow it
-TZ = ZoneInfo(os.environ.get("OWNER_TZ", "Asia/Tashkent"))
+# The owner's clock (Moscow, UTC+3; set OWNER_TZ when he travels): every «в 18:00», reminder, schedule and the
+# daily limit follow it
+TZ = ZoneInfo(os.environ.get("OWNER_TZ", "Europe/Moscow"))
 
 
 def day_start() -> float:
