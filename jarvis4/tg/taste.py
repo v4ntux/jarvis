@@ -1,0 +1,162 @@
+"""Jarvis's stickers and GIFs: he picks them himself, keeps favorites, and sends them like a person.
+
+Stickers come from the packs installed on his own account (the first time he searches for a few meme packs and
+installs them), and from what his friends send: a sticker seen in a chat is added to the pool of that emoji. A GIF is
+a search through Telegram's @gif bot or one of his favorites. Everything here is best effort: a failed sticker never
+breaks an answer.
+"""
+from __future__ import annotations
+
+import logging
+import random
+import re
+import time
+
+log = logging.getLogger("jarvis4.taste")
+
+PACK_QUERIES = ("мемы", "dark meme", "кринж", "pepe", "cats meme")
+MIN_PACKS = 3
+MAX_INSTALL = 5
+POOL_TTL = 3600
+GAP = 45  # seconds between two stickers or GIFs in one chat
+HOURLY = 30
+CHOICES = 5
+GIF_BOT = "gif"
+BLOCKED = re.compile(r"porn|sex|nude|naked|nsfw|xxx|hentai|gore|секс|порно|голый|голая|обнаж|18\+", re.I)
+
+
+class Taste:
+    def __init__(self, client, store, rng: random.Random | None = None):
+        self.client, self.store = client, store
+        self.rng = rng or random.Random()
+        self.pool: dict[str, list] = {}  # emoji → stickers of his packs
+        self.pool_at = 0.0
+        self.friends: dict[str, list] = {}  # emoji → stickers people sent him lately (he sends them back)
+        self.sent: dict[int, float] = {}
+        self.hourly: list[float] = []
+
+    def may(self, chat: int) -> bool:
+        now = time.time()
+        self.hourly = [t for t in self.hourly if now - t < 3600]
+        return now - self.sent.get(chat, 0) >= GAP and len(self.hourly) < HOURLY
+
+    async def express(self, entity, chat_id: int, sticker: str = "", gif: str = "", reply_to: int | None = None):
+        """Sends one sticker or GIF (the sticker wins when both are asked); the sent message, or None."""
+        if not (sticker or gif) or not self.may(chat_id):
+            return None
+        try:
+            sent = await self._sticker(entity, sticker, reply_to) if sticker else None
+            sent = sent or (await self._gif(entity, gif, reply_to) if gif else None)
+        except Exception as e:  # Telegram refuses things now and then; a missing sticker is not worth an error
+            log.warning("sticker or GIF failed: %s: %s", type(e).__name__, e)
+            return None
+        if sent:
+            self.sent[chat_id] = time.time()
+            self.hourly.append(time.time())
+        return sent
+
+    def saw_sticker(self, msg) -> None:
+        """A friend sent a sticker: it joins the stickers Jarvis may send for that emoji."""
+        emoji = ((msg.file.emoji if msg.file else "") or "").replace("️", "")
+        if emoji and msg.sticker:
+            bucket = self.friends.setdefault(emoji, [])
+            if all(d.id != msg.sticker.id for d in bucket):
+                bucket.append(msg.sticker)
+                del bucket[:-30]
+
+    async def love(self, msg, description: str) -> None:
+        """He liked the GIF or sticker in this message: a GIF goes to his favorites, a sticker's pack gets installed."""
+        from telethon import utils
+        from telethon.errors import RPCError
+        from telethon.tl.functions.messages import InstallStickerSetRequest, SaveGifRequest
+        from telethon.tl.types import DocumentAttributeSticker, InputStickerSetID, InputStickerSetShortName
+
+        try:
+            if msg.gif:
+                await self.client(SaveGifRequest(id=utils.get_input_document(msg.gif), unsave=False))
+                self.store.fave_add("gif", msg.gif.id, description)
+            elif msg.sticker:
+                for attr in msg.sticker.attributes:
+                    if isinstance(attr, DocumentAttributeSticker) and isinstance(
+                            attr.stickerset, (InputStickerSetID, InputStickerSetShortName)):
+                        await self.client(InstallStickerSetRequest(stickerset=attr.stickerset, archived=False))
+                        self.pool_at = 0
+                        break
+        except RPCError as e:
+            log.warning("could not keep it: %s", e)
+
+    async def warm(self) -> None:
+        try:
+            await self._pool()
+        except Exception as e:
+            log.warning("sticker pool failed: %s: %s", type(e).__name__, e)
+
+    async def _pool(self) -> dict[str, list]:
+        if self.pool and time.time() - self.pool_at < POOL_TTL:
+            return self.pool
+        from telethon.tl.functions.messages import GetAllStickersRequest, GetStickerSetRequest
+        from telethon.tl.types import InputStickerSetID
+
+        sets = list(getattr(await self.client(GetAllStickersRequest(0)), "sets", []))
+        if len(sets) < MIN_PACKS:
+            await self._find_packs()
+            sets = list(getattr(await self.client(GetAllStickersRequest(0)), "sets", []))
+        pool: dict[str, list] = {}
+        for pack in sets[:15]:
+            full = await self.client(GetStickerSetRequest(InputStickerSetID(pack.id, pack.access_hash), 0))
+            docs = {d.id: d for d in full.documents}
+            for entry in full.packs:
+                for doc_id in entry.documents:
+                    if doc_id in docs:
+                        pool.setdefault(entry.emoticon.replace("️", ""), []).append(docs[doc_id])
+        self.pool, self.pool_at = pool, time.time()
+        log.info("sticker pool: %d packs, %d emoji", len(sets), len(pool))
+        return pool
+
+    async def _find_packs(self) -> None:
+        from telethon.tl.functions.messages import InstallStickerSetRequest, SearchStickerSetsRequest
+        from telethon.tl.types import InputStickerSetID
+
+        installed = 0
+        for query in PACK_QUERIES:
+            found = await self.client(SearchStickerSetsRequest(q=query, hash=0))
+            for covered in list(getattr(found, "sets", []))[:1]:
+                pack = covered.set
+                await self.client(InstallStickerSetRequest(
+                    stickerset=InputStickerSetID(pack.id, pack.access_hash), archived=False))
+                installed += 1
+            if installed >= MAX_INSTALL:
+                break
+
+    async def _sticker(self, entity, emoji: str, reply_to: int | None):
+        from telethon.tl.functions.messages import GetStickersRequest
+
+        key = emoji.replace("️", "")
+        options = list((await self._pool()).get(key) or []) + self.friends.get(key, [])
+        if not options:
+            options = list(getattr(await self.client(GetStickersRequest(emoticon=emoji, hash=0)), "stickers", []))
+        if not options:
+            return None
+        return await self.client.send_file(entity, self.rng.choice(options), reply_to=reply_to)
+
+    async def _gif(self, entity, what: str, reply_to: int | None):
+        if what.startswith("#"):
+            return await self._favorite(entity, what[1:], reply_to)
+        if BLOCKED.search(what):
+            return None
+        results = await self.client.inline_query(GIF_BOT, what)
+        if not results:
+            return None
+        return await self.rng.choice(list(results)[:CHOICES]).click(entity, reply_to=reply_to)
+
+    async def _favorite(self, entity, number: str, reply_to: int | None):
+        from telethon.tl.functions.messages import GetSavedGifsRequest
+
+        doc_id = self.store.fave_doc(int(number)) if number.isdigit() else None
+        if doc_id is None:
+            return None
+        gifs = getattr(await self.client(GetSavedGifsRequest(0)), "gifs", [])
+        doc = next((g for g in gifs if g.id == doc_id), None)
+        if doc is None:
+            return None
+        return await self.client.send_file(entity, doc, reply_to=reply_to)

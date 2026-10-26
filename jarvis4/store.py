@@ -114,6 +114,13 @@ class Store:
         self.db.commit()
         return Msg(ref, chat, sender, ts, text, media, reply_ref, forward_ref, relay, task)
 
+    def add_msg_if_new(self, ref: str, *args, **kwargs) -> bool:
+        """History brought in from Telegram: never overwrites a message Jarvis already holds (its task, its relay)."""
+        if self.msg(ref) is not None:
+            return False
+        self.add_msg(ref, *args, **kwargs)
+        return True
+
     def set_relay(self, ref: str, relay: dict) -> None:
         """Marks a message as a note that stands for other messages (a stranger's words passed on to the owner)."""
         self.db.execute("UPDATE msgs SET relay = ? WHERE ref = ?", (json.dumps(relay, ensure_ascii=False), ref))
@@ -125,19 +132,20 @@ class Store:
 
     def recent(self, chat: str, limit: int) -> list[Msg]:
         """The newest `limit` messages of a chat, oldest first, from the chat's last fresh start on."""
-        floor = int(self.meta_get(f"fresh:{chat}", "0") or 0)
-        rows = self.db.execute(f"SELECT {MSG_COLS} FROM msgs WHERE chat = ? AND id > ? ORDER BY id DESC LIMIT ?",
+        floor = float(self.meta_get(f"fresh:{chat}", "0") or 0)
+        rows = self.db.execute(f"SELECT {MSG_COLS} FROM msgs WHERE chat = ? AND ts > ? ORDER BY ts DESC, id DESC LIMIT ?",
                                (chat, floor, limit)).fetchall()
         return [_msg(r) for r in reversed(rows)]
 
     def chat_msgs(self, chat: str, kind: str = "", limit: int = 50, after_ref: str = "") -> list[Msg]:
         """Messages of a chat (all of them, not just since the fresh start), optionally of one media kind."""
-        floor = 0
+        floor, floor_id = 0.0, 0
         if after_ref:
-            row = self.db.execute("SELECT id FROM msgs WHERE ref = ?", (after_ref,)).fetchone()
-            floor = row[0] if row else 0
-        rows = self.db.execute(f"SELECT {MSG_COLS} FROM msgs WHERE chat = ? AND id > ? ORDER BY id DESC LIMIT 500",
-                               (chat, floor)).fetchall()
+            row = self.db.execute("SELECT ts, id FROM msgs WHERE ref = ?", (after_ref,)).fetchone()
+            floor, floor_id = (row[0], row[1]) if row else (0.0, 0)
+        rows = self.db.execute(
+            f"SELECT {MSG_COLS} FROM msgs WHERE chat = ? AND (ts > ? OR (ts = ? AND id > ?)) "
+            "ORDER BY ts DESC, id DESC LIMIT 500", (chat, floor, floor, floor_id)).fetchall()
         found = [_msg(r) for r in reversed(rows)]
         if kind:
             found = [m for m in found if (m.media or {}).get("kind") == kind]
@@ -145,8 +153,8 @@ class Store:
 
     def fresh_start(self, chat: str) -> None:
         """«Новый чат»: the model stops seeing what came before; the rows stay for learning."""
-        row = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM msgs WHERE chat = ?", (chat,)).fetchone()
-        self.meta_set(f"fresh:{chat}", str(row[0]))
+        row = self.db.execute("SELECT COALESCE(MAX(ts), 0) FROM msgs WHERE chat = ?", (chat,)).fetchone()
+        self.meta_set(f"fresh:{chat}", repr(row[0]))
 
     def count_msgs(self, chat: str, sender: str, since: float) -> int:
         return self.db.execute("SELECT COUNT(*) FROM msgs WHERE chat = ? AND sender = ? AND ts >= ?",
@@ -212,6 +220,10 @@ class Store:
             self.db.execute("UPDATE chats SET title = ? WHERE key = ?", (title, key))
         self.db.commit()
         return bool(cur.rowcount)
+
+    def chat_tg_id(self, key: str) -> int:
+        row = self.db.execute("SELECT tg_id FROM chats WHERE key = ?", (key,)).fetchone()
+        return row[0] if row and row[0] else 0
 
     def chat(self, key: str) -> tuple[str, str, str] | None:
         """(kind, title, mode) of a chat."""

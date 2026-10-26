@@ -219,6 +219,13 @@ class Core:
             await itx.out.say(f"споткнулся: {type(e).__name__}. гляну логи, если надо — скажи")
         finally:
             self.store.task_end(itx.id, status, itx.spent, answer)
+            await self._finish(itx)
+
+    async def _finish(self, itx: Interaction) -> None:
+        try:
+            await itx.out.finish()
+        except Exception:
+            log.debug("finish failed", exc_info=True)
 
     def _lied(self, itx: Interaction, outcome: Outcome) -> bool:
         """The mouth called no tool, yet its answer claims a deed: a task it only pretended to do."""
@@ -234,6 +241,8 @@ class Core:
             if ref:
                 self.store.add_msg(ref, itx.chat, "jarvis", piece, reply_ref=itx.ref if itx.kind == "group" else "",
                                    task=itx.id)
+        if itx.kind == "group":
+            self.group_last_spoke[itx.chat] = (time.time(), itx.sender)
 
     # ---- strangers and groups ----------------------------------------------------------------------------------
 
@@ -289,8 +298,6 @@ class Core:
             answer = outcome.text
             if not outcome.silent and answer.strip():
                 await self.deliver(itx, answer)
-                if itx.kind == "group":
-                    self.group_last_spoke[itx.chat] = (time.time(), itx.sender)
         except asyncio.CancelledError:
             status = "stopped"
             raise

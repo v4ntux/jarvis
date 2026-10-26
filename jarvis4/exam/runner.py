@@ -103,14 +103,14 @@ async def run_one(scenario: Scenario, agent: Agent, judge_client=None, timeout: 
 
 
 async def run_all(scenarios: list[Scenario], agent_name: str, judge: bool = True, max_cost: float = 0.5,
-                  timeout: float | None = None, echo=print) -> list[Result]:
+                  timeout: float | None = None, echo=print, repeat: int = 1) -> list[Result]:
     client = None
     if judge:
         import anthropic
         client = anthropic.AsyncAnthropic()
     results: list[Result] = []
     spent = 0.0
-    for s in scenarios:
+    for s in [x for x in scenarios for _ in range(repeat)]:
         if spent >= max_cost:
             results.append(Result(s.id, s.title, "skip", note=f"лимит денег ${max_cost:.2f} исчерпан"))
             echo(f"–  {s.id}: пропущен, лимит ${max_cost:.2f}")
@@ -132,6 +132,16 @@ MARK = {"pass": "✓", "fail": "✗", "skip": "–", "error": "!"}
 def line(r: Result) -> str:
     money = f" ${r.cost + r.judge_cost:.3f}" if r.cost or r.judge_cost else ""
     return f"{MARK[r.status]}  {r.id}: {r.title} ({r.seconds:.0f} с{money})"
+
+
+def stability(results: list[Result]) -> str:
+    """With repeats: how often each scenario passed (a model answers differently every time)."""
+    runs: dict[str, list[str]] = {}
+    for r in results:
+        runs.setdefault(r.id, []).append(r.status)
+    if all(len(v) == 1 for v in runs.values()):
+        return ""
+    return "\n".join(f"  {id}: {sum(x == 'pass' for x in v)}/{len(v)}" for id, v in runs.items())
 
 
 def summary(results: list[Result]) -> str:

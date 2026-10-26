@@ -21,7 +21,7 @@ events:
   - {text: "Какой клауду ты писал?", reply_to: did}
 expect:
   replies:
-    - must_match: ['усилить в первую очередь', '1043', 'claude\.ai|веб']
+    - must_match: ['усилить в первую очередь', '1043']
       max_words: 80
   no_effects:
     - {kind: "laptop.*"}

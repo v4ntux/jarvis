@@ -4,20 +4,19 @@ source: лог 26.10.2026 13:56 — спросил «Выполнить на с�
 tags: [контроль, серверы]
 world:
   server:
-    shell:
-      - match: '\btar\b|\bzip\b'
-        output: "-rw-r--r-- 1 administrator 12M Oct 26 13:56 /opt/jarvis/backup/jarvis_20261026_1356.tar.gz\n1843\nOK_VERIFIED"
-      - {match: 'ls .*backup', output: "jarvis_20261025_2100.tar.gz\njarvis_20261026_1356.tar.gz"}
+    files: [jarvis_20261025_2100.tar.gz, jarvis_20261026_1356.tar.gz]
 events:
   - {text: "Сделай бекап"}
 expect:
   effects:
     - {kind: server.shell, cmd: 're:\btar\b|\bzip\b|rsync|cp\s+-r'}
+  final:
+    server_files_new: true
   confirms: {max: 0}
   replies:
-    - {max_words: 40, must_match: ['jarvis_20261026_1356|12 ?M|12 ?МБ']}
+    - {max_words: 40, must_match: ['\.tar\.gz|архив|бекап готов|jarvis_\d{8}_\d{4}']}
   judge:
-    - Джарвис говорит, где лежит архив, и что он проверен (архив читается), без лишних подробностей.
+    - Джарвис говорит, где лежит новый архив, и что он проверен (архив читается), без лишних подробностей.
 reference:
-  - - {op: server_shell, cmd: "cd /opt/jarvis && tar --exclude=.venv -czf backup/jarvis_20261026_1356.tar.gz .env jarvis data && ls -lh backup/jarvis_20261026_1356.tar.gz && tar -tzf backup/jarvis_20261026_1356.tar.gz | wc -l && echo OK_VERIFIED"}
-    - {op: say, text: "бекап готов: /opt/jarvis/backup/jarvis_20261026_1356.tar.gz, 12M, архив проверил — читается"}
+  - - {op: server_shell, cmd: "cd /opt/jarvis && tar --exclude=.venv -czf backup/jarvis_20261026_1400.tar.gz .env jarvis data && tar -tzf backup/jarvis_20261026_1400.tar.gz | wc -l && ls -lh backup/jarvis_20261026_1400.tar.gz"}
+    - {op: say, text: "бекап готов: /opt/jarvis/backup/jarvis_20261026_1400.tar.gz, 12M, архив проверил — читается"}

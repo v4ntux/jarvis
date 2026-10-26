@@ -97,9 +97,9 @@ class GuardTest(unittest.TestCase):
         result, llm, _ = play("backup-no-questions", [
             use("do_task", goal="Сделай бекап", effort="simple"),
             use("server_shell", command="cd /opt/jarvis && set -a && . ./.env && set +a && tar -czf b.tgz data"),
-            use("server_shell", command="cd /opt/jarvis && tar --exclude=.venv -czf backup/jarvis_20261026_1356.tar.gz "
-                                         ".env jarvis data && ls -lh backup/jarvis_20261026_1356.tar.gz && echo OK_VERIFIED"),
-            say("бекап готов: /opt/jarvis/backup/jarvis_20261026_1356.tar.gz, 12M, проверил"), OK])
+            use("server_shell", command="cd /opt/jarvis && tar --exclude=.venv -czf backup/jarvis_$(date +%Y%m%d_%H%M).tar.gz "
+                                         ".env jarvis data && tar -tzf backup/jarvis_$(date +%Y%m%d_%H%M).tar.gz | wc -l"),
+            say("бекап готов: /opt/jarvis/backup/jarvis_20261026_1400.tar.gz, 12M, проверил"), OK])
         self.assertEqual(result.status, "pass", failed(result))
         refused = llm.calls[2]["messages"][-1]["content"][0]["content"][0]["text"]
         self.assertTrue(refused.startswith("Отказ охраны"), refused)
@@ -164,7 +164,7 @@ class ModeTest(unittest.TestCase):
             use("laptop_close", title="Claude Code"), use("laptop_click", element="tb_claude_app"),
             say("косяк. терминал закрыл, открыл приложение Claude из панели задач"), OK])
         self.assertEqual(result.status, "pass", failed(result))
-        self.assertIn("Ван злится", llm.calls[0]["system"][0]["text"])
+        self.assertIn("Ван злится", llm.calls[0]["system"][1]["text"])
         self.assertEqual(llm.calls[1]["model"], "claude-haiku-5-5")  # «simple» stays on the cheap model
 
 

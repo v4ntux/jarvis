@@ -68,6 +68,9 @@ class WorldOut:
     async def typing(self) -> None:
         pass
 
+    async def finish(self) -> None:
+        pass
+
 
 class WorldTelegram:
     def __init__(self, world: World):
@@ -139,6 +142,7 @@ class WorldLaptop:
 
     async def windows(self) -> list[Window]:
         self.w._need_laptop()
+        self.w._seen("; ".join(f"{x.title} ({x.kind}, {x.process})" for x in self.w.windows) or "окон нет")
         return [Window(x.title, x.process, x.kind) for x in self.w.windows]
 
     async def look(self) -> str:
@@ -213,6 +217,8 @@ class Jarvis4(Agent):
         platform = Platform(tg=WorldTelegram(world), server=WorldServer(world), web=WorldWeb(world),
                             laptop=WorldLaptop(world))
         llm = self.llm_factory(self.store) if self.llm_factory else None
+        if os.environ.get("EXAM_DEBUG"):
+            llm = _Traced(llm or Core(cfg, self.store, platform).llm, world)
         self.core = Core(cfg, self.store, platform, llm=llm, outs=lambda chat: WorldOut(world, chat))
         run_tool = self.core.run_tool
 
@@ -221,6 +227,15 @@ class Jarvis4(Agent):
             return await run_tool(tool, call, itx, show)
 
         self.core.run_tool = noted
+        stop_all = self.core.stop_all
+
+        async def stopped(chat="owner"):
+            did = await stop_all(chat)
+            if did:
+                world.effect("stop", chat=chat)  # the judge reads «стоп» as a deed the world saw
+            return did
+
+        self.core.stop_all = stopped
         self._seed()
 
     def _seed(self) -> None:
@@ -274,3 +289,24 @@ class Jarvis4(Agent):
         await asyncio.gather(*tasks, return_exceptions=True)
         self.spent = self.store.spent_since(0)
         self.store.close()
+
+
+class _Traced:
+    """EXAM_DEBUG=1: every request to the model goes into the run's timeline, to see what the model was shown."""
+
+    def __init__(self, inner, world: World):
+        self.inner, self.world = inner, world
+
+    @property
+    def ready(self) -> bool:
+        return True
+
+    async def complete(self, model, system, messages, tools=None, **kw):
+        steady = system if isinstance(system, str) else system[0]["text"]
+        live = "" if isinstance(system, str) or len(system) < 2 else system[1]["text"]
+        last = messages[-1]["content"] if messages else ""
+        self.world.timeline.append(f"  [запрос {model}] live={live[:400]!r} последнее={str(last)[:700]!r} "
+                                   f"инструменты={[t['name'] for t in tools or []]}")
+        reply = await self.inner.complete(model, system, messages, tools, **kw)
+        self.world.timeline.append(f"  [ответ] текст={reply.text[:300]!r} вызовы={[(c.name, c.input) for c in reply.calls]}")
+        return reply

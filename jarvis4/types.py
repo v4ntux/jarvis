@@ -19,6 +19,7 @@ class Out(Protocol):
     async def progress(self, line: str) -> None: ...  # the one task message that keeps updating
     async def send_file(self, name: str, data: bytes) -> None: ...
     async def typing(self) -> None: ...
+    async def finish(self) -> None: ...  # the task is over: take the status line away
 
 
 class Mode(str, enum.Enum):

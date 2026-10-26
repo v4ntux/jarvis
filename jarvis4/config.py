@@ -48,7 +48,15 @@ class Config:
     tg_api_hash: str = ""
     tg_session: str = "/opt/jarvis/data/tg_user"
     gemini_key: str = ""
+    gemini_models: str = "gemini-3.6-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite"
+    live_models: str = "gemini-3.8-live,gemini-3.1-flash-live-preview"
+    live_voice: str = "Charon"
+    call_minutes: int = 10
     owner_phone: str = ""
+    smsc_login: str = ""
+    smsc_password: str = ""
+    smsc_api_key: str = ""
+    phone_daily_limit: int = 10
 
     def price(self, model: str) -> tuple[float, float]:
         return self.prices.get(model, self.prices[SONNET])
@@ -83,5 +91,13 @@ def load(env=os.environ) -> Config:
         tg_api_hash=env.get("TG_API_HASH", ""),
         tg_session=env.get("TG_SESSION") or base.tg_session,
         gemini_key=env.get("GEMINI_API_KEY", ""),
+        gemini_models=env.get("GEMINI_MODEL") or base.gemini_models,
+        live_models=env.get("GEMINI_LIVE_MODEL") or base.live_models,
+        live_voice=env.get("GEMINI_VOICE") or base.live_voice,
+        call_minutes=num("CALL_MINUTES", base.call_minutes),
         owner_phone=env.get("OWNER_PHONE", ""),
+        smsc_login=env.get("SMSC_LOGIN", ""),
+        smsc_password=env.get("SMSC_PASSWORD", ""),
+        smsc_api_key=env.get("SMSC_API_KEY", ""),
+        phone_daily_limit=num("PHONE_DAILY_LIMIT", base.phone_daily_limit),
     )

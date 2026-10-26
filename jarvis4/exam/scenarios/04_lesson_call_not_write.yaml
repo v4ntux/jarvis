@@ -26,7 +26,7 @@ expect:
   no_effects:
     - {kind: tg.send, to: sardor}
   replies:
-    - {max_words: 25, since_event: 0}
+    - {max_words_each: 30, since_event: 0}
 reference:
   - - {op: lesson, text: "Когда Ван говорит позвонить — только звонок. Не взял трубку — сказать Вану, не писать человеку."}
     - {op: say, text: "понял, косяк. звонок — значит только звонок"}

@@ -18,6 +18,7 @@ def main() -> int:
     parser.add_argument("--no-judge", action="store_true", help="без судьи-модели: только проверки кодом, бесплатно")
     parser.add_argument("--max-cost", type=float, default=0.5, help="остановиться, когда потрачено столько $")
     parser.add_argument("--timeout", type=float, default=None, help="секунд на событие (по умолчанию из сценария)")
+    parser.add_argument("--repeat", type=int, default=1, help="прогнать каждый сценарий столько раз (модель отвечает по-разному)")
     parser.add_argument("--out", default=REPORTS, help="куда писать отчёт")
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
@@ -27,8 +28,10 @@ def main() -> int:
         print("Нет таких сценариев.")
         return 2
     judge = not args.no_judge and not args.agent.startswith("scripted:")
-    results = asyncio.run(runner.run_all(scenarios, args.agent, judge, args.max_cost, args.timeout))
+    results = asyncio.run(runner.run_all(scenarios, args.agent, judge, args.max_cost, args.timeout, repeat=args.repeat))
     print("\n" + runner.summary(results))
+    if runner.stability(results):
+        print("Сколько раз сдан каждый:\n" + runner.stability(results))
     print("Отчёт:", runner.write_report(results, args.agent, args.out))
     return 0 if all(r.status in ("pass", "skip") for r in results) else 1
 

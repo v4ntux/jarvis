@@ -115,6 +115,9 @@ def run(scenario: Scenario, world: World, agent_cost: float = 0.0) -> list[Check
     if "audio_playing" in final:
         ok = bool(world.audio.get("playing")) == bool(final["audio_playing"])
         checks.append(Check(f"музыка играет: {final['audio_playing']}", ok, f"сейчас: {world.audio}"))
+    if final.get("server_files_new"):
+        ok = bool(world.files_created)
+        checks.append(Check("на сервере появился новый файл (архив)", ok, f"файлы: {world.server_files}"))
     if "watchers_count" in final:
         ok = len(world.watchers) == int(final["watchers_count"])
         checks.append(Check(f"наблюдателей: {final['watchers_count']}", ok, f"сейчас: {world.watchers}"))
@@ -167,6 +170,9 @@ def _reply_checks(rule: dict, world: World) -> list[Check]:
         words = len(joined.split())
         out.append(Check(f"ответ{where} не длиннее {rule['max_words']} слов", words <= rule["max_words"],
                          f"{words} слов"))
+    if "max_words_each" in rule:
+        long = [r["text"] for r in texts if len(r["text"].split()) > rule["max_words_each"]]
+        out.append(Check(f"каждое сообщение{where} не длиннее {rule['max_words_each']} слов", not long, " | ".join(long)[:300]))
     if "max_messages" in rule:
         out.append(Check(f"сообщений{where} не больше {rule['max_messages']}", len(texts) <= rule["max_messages"],
                          f"{len(texts)}"))

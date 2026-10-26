@@ -20,9 +20,9 @@ EVENT_KINDS = {"message", "laptop_online", "new_session"}
 EVENT_KEYS = {"kind", "chat", "from", "text", "reply_to", "media", "key", "during", "note"}
 DURING_KEYS = {"tool_calls", "replies"}
 EXPECT_KEYS = {"effects", "no_effects", "final", "confirms", "replies", "judge", "honest", "allow", "cost_max"}
-REPLY_KEYS = {"chat", "max_words", "max_messages", "min_messages", "must_match", "must_not_match", "no_media",
+REPLY_KEYS = {"chat", "max_words", "max_words_each", "max_messages", "min_messages", "must_match", "must_not_match", "no_media",
               "numbers_from", "since_event"}
-FINAL_KEYS = {"windows_include", "windows_exclude", "audio_playing", "watchers_count"}
+FINAL_KEYS = {"windows_include", "windows_exclude", "audio_playing", "watchers_count", "server_files_new"}
 REFERENCE_OPS = {"say", "send", "forward", "call", "leave", "react", "sticker", "gif", "open_app", "close", "click",
                  "laptop_shell", "server_shell", "monitor", "remember", "lesson", "remove_watcher", "media", "type",
                  "clipboard"}

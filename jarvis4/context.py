@@ -118,8 +118,8 @@ def system(core, itx: Interaction, role: str, goal: str = "") -> list[dict]:
         title = (st.chat(itx.chat) or ("", "группа", ""))[1]
         how = persona.GROUP_SELF if itx.spontaneous else persona.GROUP_CALLED
         parts.append(persona.GROUP.format(title=title, how=how))
-    parts.append(persona.MODES[itx.mode])
     if itx.owner:
+        parts.append(persona.HOME)
         facts = st.facts()
         if facts:
             parts.append("Что ты знаешь о Ване:\n" + "\n".join(f"#{i}: {t}" for i, t in facts))
@@ -144,6 +144,7 @@ def system(core, itx: Interaction, role: str, goal: str = "") -> list[dict]:
         if recent:
             live.append("Твои последние действия (для вопросов «что ты делал», точные тексты через инструмент journal):\n"
                         + recent)
+    live.append(persona.MODES[itx.mode])  # last in the prompt: the mood must not be lost among the rules
     if itx.note:
         live.append(itx.note)
     if goal:

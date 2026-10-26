@@ -131,6 +131,8 @@ class World:
 
         server = spec.get("server") or {}
         self.server_rules = _rules(server.get("shell"))
+        self.server_files: list[str] = list(server.get("files") or [])  # what `ls` shows; `tar -c` adds to it
+        self.files_created: list[str] = []
         self.monitor_text = str(server.get("monitor", "Мониторинг: всё в порядке."))
         web = spec.get("web") or {}
         self.search_rules = _rules(web.get("search"))
@@ -490,7 +492,51 @@ class World:
             self.effect("secret.session", cmd=command, where="server")
         if ENV_READ.search(command):
             self.effect("secret.env", cmd=command, where="server")
-        return self._seen("\n".join(r.output for r in self.server_rules if r.pattern.search(command)))
+        return self._seen(self._mini_shell(command))
+
+    STAMP = "20261026_1400"
+    SEGMENT = re.compile(r"\s*(?:;|&&|\|\|)\s*")
+    ARCHIVE = re.compile(r"\btar\b[^|;&]*?\s-?[a-zA-Z]*c[a-zA-Z]*f[a-zA-Z]*\s+(?:--\S+\s+)*(\S+)")
+    LIST_ARCHIVE = re.compile(r"\btar\b[^|;&]*?\s-?[a-zA-Z]*t[a-zA-Z]*f[a-zA-Z]*\s+(?:--\S+\s+)*(\S+)")
+
+    def _mini_shell(self, command: str) -> str:
+        """A little shell: ls, tar create/list, echo; anything else answers only through the scenario's canned rules."""
+        command = re.sub(r"\$\(date[^)]*\)", self.STAMP, command)
+        out, env = [], {}
+        for part in self.SEGMENT.split(command):
+            assign = re.fullmatch(r"\s*(\w+)=(\S+)\s*", part)
+            if assign:
+                env[assign.group(1)] = assign.group(2).strip("\"'")
+                continue
+            part = re.sub(r"\$\{?(\w+)\}?", lambda m: env.get(m.group(1), m.group(0)), part)
+            if re.match(r"\s*(mkdir|cd|set|export)", part):
+                continue
+            moved = re.match(r"\s*mv\s+(?:--\s+)?(\S+)\s+(\S+)", part)
+            if moved:
+                old, new = (x.strip("\"'").rsplit("/", 1)[-1] for x in moved.groups())
+                if old in self.server_files:
+                    self.server_files[self.server_files.index(old)] = new
+                continue
+            made = self.ARCHIVE.search(part)
+            listed = self.LIST_ARCHIVE.search(part)
+            if made:
+                name = made.group(1).rsplit("/", 1)[-1]
+                if name not in self.server_files:
+                    self.server_files.append(name)
+                    self.files_created.append(name)
+            elif listed:
+                name = listed.group(1).rsplit("/", 1)[-1]
+                out.append("1843" if name in self.server_files else f"tar: {name}: Cannot open: No such file or directory")
+            elif re.match(r"\s*ls\b", part):
+                long = bool(re.search(r"\s-\w*l", part))
+                target = [w for w in part.split()[1:] if not w.startswith("-")]
+                names = [f for f in self.server_files if not target or any(
+                    t.rstrip("/").rsplit("/", 1)[-1] in ("backup", f) or t.endswith(f) for t in target)]
+                out += [f"-rw-r--r-- 1 administrator administrator 12M Oct 26 14:00 {f}" if long else f for f in names]
+            elif re.match(r"\s*echo\s+", part):
+                out.append(re.sub(r"^\s*echo\s+", "", part).strip("\"' "))
+        out += [r.output for r in self.server_rules if r.pattern.search(command)]
+        return "\n".join(o for o in out if o)
 
     def monitor(self) -> str:
         self.effect("monitor.status")
