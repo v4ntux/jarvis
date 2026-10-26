@@ -56,7 +56,16 @@ class Config:
     smsc_login: str = ""
     smsc_password: str = ""
     smsc_api_key: str = ""
+    smsc_voice: str = "m"
     phone_daily_limit: int = 10
+    monitor_sites: str = "https://nvate.uz"
+    monitor_hosts: str = "London=root@46.226.162.170"  # name=user@host, comma separated
+
+    # Other machines Jarvis may reach: JSON {"servers": {name: {"target": "user@host", "key": path}}, "android": {...}}
+    nodes: str = ""
+    dry_run: bool = False  # log what would be sent instead of sending (a first look at a new build)
+    eyes_steps: int = 25  # actions of one screen task
+    eyes_task_limit: float = 0.5  # dollars of one screen task
 
     def price(self, model: str) -> tuple[float, float]:
         return self.prices.get(model, self.prices[SONNET])
@@ -79,11 +88,12 @@ def load(env=os.environ) -> Config:
         mouth_model=env.get("JARVIS_MOUTH_MODEL") or base.mouth_model,
         brain_model=env.get("JARVIS_BRAIN_MODEL") or base.brain_model,
         deep_model=env.get("JARVIS_DEEP_MODEL") or base.deep_model,
-        daily_limit=num("DAILY_LIMIT", base.daily_limit),
-        soft_limit=num("SOFT_LIMIT", base.soft_limit),
-        owner_reserve=num("OWNER_RESERVE", base.owner_reserve),
-        task_limit=num("TASK_LIMIT", base.task_limit),
-        others_daily=num("OTHERS_DAILY", base.others_daily),
+        # J4_ names: the old bot shares this .env, and its DAILY_LIMIT (3) is not the owner's limit for this one
+        daily_limit=num("J4_DAILY_LIMIT", base.daily_limit),
+        soft_limit=num("J4_SOFT_LIMIT", base.soft_limit),
+        owner_reserve=num("J4_OWNER_RESERVE", base.owner_reserve),
+        task_limit=num("J4_TASK_LIMIT", base.task_limit),
+        others_daily=num("J4_OTHERS_DAILY", base.others_daily),
         hands_host=env.get("HANDS_HOST") or base.hands_host,
         hands_port=num("HANDS_PORT", base.hands_port),
         hands_token=env.get("HANDS_TOKEN", ""),
@@ -99,5 +109,12 @@ def load(env=os.environ) -> Config:
         smsc_login=env.get("SMSC_LOGIN", ""),
         smsc_password=env.get("SMSC_PASSWORD", ""),
         smsc_api_key=env.get("SMSC_API_KEY", ""),
+        smsc_voice=env.get("SMSC_VOICE") or base.smsc_voice,
         phone_daily_limit=num("PHONE_DAILY_LIMIT", base.phone_daily_limit),
+        monitor_sites=env.get("MONITOR_SITES", base.monitor_sites),
+        monitor_hosts=env.get("MONITOR_HOSTS", base.monitor_hosts),
+        nodes=env.get("JARVIS_NODES", ""),
+        dry_run=env.get("JARVIS_DRY_RUN", "") not in ("", "0", "false"),
+        eyes_steps=num("EYES_STEPS", base.eyes_steps),
+        eyes_task_limit=num("EYES_TASK_LIMIT", base.eyes_task_limit),
     )

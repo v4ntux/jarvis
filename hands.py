@@ -17,7 +17,7 @@ import time
 
 import aiohttp
 
-from core import actions, desktop, routines, server_link, vision
+from core import actions, desktop, probe, routines, server_link, vision
 
 ALLOWED = {
     "open_app", "close_app", "type_text", "hotkey", "list_windows", "focus_window",
@@ -55,14 +55,16 @@ def add_app(name, path):
 
 
 def open_app(name):
-    path = _apps().get(str(name).strip().lower())
-    if path:
-        # Launching a running single-instance app (Telegram) brings its window back from the tray
-        previous = actions.foreground_window()
-        os.startfile(path)
-        actions._after_launch(previous, os.path.splitext(os.path.basename(path))[0])
-        return "Запускаю %s." % name
-    return actions.open_app(name)
+    """The program the owner means, not whatever the name is on PATH: taught paths, running apps, the Start menu
+    and installed Store apps come first (probe.open_smart); the old lookup is the last resort."""
+    return probe.open_smart(name)
+
+
+def media_checked(action):
+    """A player key, then the fact: is sound really coming out afterwards?"""
+    said = actions.media(action)
+    time.sleep(1.0)
+    return "%s %s" % (said or "Готово.", probe.audio_status())
 
 
 MAX_FILE = 20 * 1024 * 1024  # Telegram bot uploads stop at 50 MB; base64 over WS adds a third
@@ -149,7 +151,11 @@ def forget_routine(name):
 
 
 # Laptop-side tools that are not plain core/actions functions
-LOCAL = {"add_app": add_app, "open_app": open_app, "run_shell": run_shell, "read_file": read_file,
+LOCAL = {"windows_info": probe.windows_info, "close_window": probe.close_window, "focus_window": probe.focus_window,
+         "find_apps": lambda name: json.dumps(probe.find_apps(name), ensure_ascii=False),
+         "audio_status": probe.audio_status, "taskbar": probe.taskbar_text, "taskbar_click": probe.taskbar_click,
+         "screenshot": probe.screenshot, "screen_do": probe.screen_do, "media_checked": media_checked,
+         "add_app": add_app, "open_app": open_app, "run_shell": run_shell, "read_file": read_file,
          "write_file": write_file, "send_file": send_file, "send_screen": send_screen, "put_file": put_file,
          "record_routine": record_routine, "stop_recording": stop_recording, "run_routine": run_routine,
          "list_routines": list_routines, "forget_routine": forget_routine}

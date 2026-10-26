@@ -24,6 +24,8 @@ MOUTH_PROMPT = """Ты сейчас быстрый «рот» Джарвиса: 
 BRAIN_PROMPT = """Ты сейчас «мозг» Джарвиса: тебе передали задачу, выполни её сам инструментами. Ответ Вану после дела \
 короткий: что сделано и чего не вышло."""
 
+SPEAK = ("[система] Ты сделал дело (или оно не вышло), а Вану не сказал ни слова. Скажи ему одной-двумя короткими "
+         "фразами, что вышло. Если не вышло или человек не взял трубку, так и скажи; ничего не выдумывай.")
 MAX_RESULT = 5000
 KEEP_IMAGES = 1
 TIER_FOR = {"simple": Tier.MOUTH, "normal": Tier.BRAIN, "deep": Tier.DEEP}
@@ -81,6 +83,7 @@ class Agent:
         tier = Tier.MOUTH if self.role == "mouth" else TIER_FOR.get(effort, Tier.BRAIN)
         out = Outcome()
         streak = 0
+        worked = failed = nudged = False  # real work was done / something did not work / the model was told to speak
         for step in range(cfg.max_steps):
             out.steps = step + 1
             if self.role == "brain" and not core.budget.task_room(itx.spent):
@@ -122,11 +125,18 @@ class Agent:
                 all_terminal = all_terminal and bool(tool and tool.terminal)
                 handoff = handoff or result.handoff
                 streak = 0 if result.ok else streak + 1
+                worked = worked or bool(tool and not tool.terminal)
+                failed = failed or not result.ok
                 blocks.append(self._block(call.id, result, streak))
             if handoff:
                 out.handoff = handoff
                 return out
             if all_terminal:
+                if not reply.text.strip() and (worked or failed) and itx.owner and not nudged and not handoff:
+                    # Work was done (or failed) and the model only waved a reaction: the owner must hear how it went
+                    nudged = True
+                    messages.append({"role": "user", "content": blocks + [{"type": "text", "text": SPEAK}]})
+                    continue
                 out.text = reply.text  # the words beside a sticker or a reaction are the message
                 return out
             messages.append({"role": "user", "content": blocks})

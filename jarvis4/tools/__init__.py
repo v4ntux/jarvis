@@ -5,13 +5,13 @@ group members' chats get only the harmless few.
 """
 from __future__ import annotations
 
-from . import handoff, laptop, memory, server, telegram
+from . import handoff, laptop, memory, phone, server, telegram
 from .base import Ctx, Risk, Tool
 
 
 def all_tools() -> dict[str, Tool]:
     found = {}
-    for module in (telegram, laptop, server, memory, handoff):
+    for module in (telegram, laptop, server, memory, handoff, phone):
         for tool in module.tools():
             found[tool.name] = tool
     return found

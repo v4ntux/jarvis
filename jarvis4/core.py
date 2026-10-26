@@ -67,6 +67,8 @@ class Core:
         self.feeder: asyncio.Task | None = None
         self.background: set[asyncio.Task] = set()
         self.answerers: list[Callable[[str], bool]] = []  # a pending yes/no question takes the owner's next word
+        self.owner_hooks: list[Callable[[], None]] = []  # any word from the owner in his chat (stops a running alarm)
+        self.commands = None  # async (text) → answer | None: the owner's /commands, set by the app
         self.group_last_spoke: dict[str, tuple[float, str]] = {}  # group → (when Jarvis last spoke, to whom)
         store.upsert_person("owner", cfg.owner_name, aliases=["ван", "van", "батя", "хозяин"], dialog=True)
 
@@ -114,6 +116,8 @@ class Core:
         """Every message Jarvis's account receives. Returns at once; the work goes on in the background."""
         self.ingest(inc)
         if inc.sender == "owner" and not inc.group:
+            for hook in self.owner_hooks:
+                hook()
             await self._from_owner(inc)
         elif inc.group:
             self.spawn(self._from_group(inc))
@@ -124,6 +128,12 @@ class Core:
         text = inc.text or ""
         if any(answer(text) for answer in self.answerers):
             return  # the answer to a yes/no question
+        if self.commands is not None and text.startswith("/"):
+            answered = await self.commands(text)
+            if answered is not None:
+                if answered:
+                    await self.out_for(inc.chat).say(answered)
+                return
         if STOP.match(text) and len(text) < 40:
             if await self.stop_all(inc.chat):
                 return
@@ -386,14 +396,49 @@ class Core:
         await asyncio.sleep(30)
         if self.frozen():
             return
+        await self.run_own_task(plan, "Сработал наблюдатель, который Ван сам заказал. Выполни его задачу.")
+
+    async def run_own_task(self, plan: str, note: str) -> None:
+        """A task nobody typed: a watcher the owner ordered, what a finished job was to be followed by."""
+        if self.frozen():
+            return
+        while self.current is not None and not self.current.done():  # the owner's own request goes first
+            await asyncio.sleep(1)
         itx = Interaction(kind="owner", chat="owner", sender="owner", text=plan, msgs=[], owner=True,
                           out=self.out_for("owner"), mode=Mode.WORK)
-        itx.note = "Сработал наблюдатель, который Ван сам заказал. Выполни его задачу."
+        itx.note = note
         self.store.task_start(itx.id, "owner", "event", plan)
-        outcome = await self.brain.run(itx, plan, "normal")
-        answer = await verify.check(self, itx, plan, outcome.text)
-        await self.deliver(itx, answer)
-        self.store.task_end(itx.id, "done", itx.spent, answer)
+        status, answer = "done", ""
+        self.current = asyncio.current_task()  # «стоп» reaches it like any other work
+        try:
+            outcome = await self.brain.run(itx, plan, "normal")
+            answer = await verify.check(self, itx, plan, outcome.text)
+            await self.deliver(itx, answer)
+        except asyncio.CancelledError:
+            status = "stopped"
+            raise
+        except Exception:
+            status = "error"
+            log.exception("own task failed")
+        finally:
+            self.store.task_end(itx.id, status, itx.spent, answer)
+            await self._finish(itx)
+            if self.current is asyncio.current_task():
+                self.current = None
+
+    async def on_job_done(self, what: str, job_id: int, code: int, tail: str, then: str = "") -> None:
+        """A background job on the server ended: the owner hears it, and the follow-up he ordered starts."""
+        if self.frozen():
+            return
+        state = "закончилась" if code == 0 else f"упала (код {code})"
+        out = self.out_for("owner")
+        text = f"фоновая задача #{job_id} «{what}» {state}" + ("\n" + tail[-600:] if code else "")
+        ref = await out.say(text)
+        if ref:
+            self.store.add_msg(ref, "owner", "jarvis", text)
+        if then and code == 0:
+            goal = then + ("\n(данные: " + tail[-1500:] + ")" if tail else "")
+            self.spawn(self.run_own_task(goal, "Фоновая задача закончилась, Ван заказал это продолжение. Выполни."))
 
     # ---- the yes/no question to the owner ----------------------------------------------------------------------
 

@@ -22,3 +22,4 @@ routines.json
 .vision-tmp/
 vision/models/
 jarvis4/exam/reports/
+.venv-test/

@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS faves (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEX
 CREATE TABLE IF NOT EXISTS skills (
     name TEXT PRIMARY KEY, description TEXT, status TEXT DEFAULT 'draft', successes INTEGER DEFAULT 0,
     failures INTEGER DEFAULT 0, last_used REAL, body TEXT);
+CREATE TABLE IF NOT EXISTS phone (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, kind TEXT, cost REAL);
 CREATE TABLE IF NOT EXISTS words (chat TEXT, word TEXT, n INTEGER, last REAL, PRIMARY KEY (chat, word));
 CREATE TABLE IF NOT EXISTS stickers_seen (
     chat TEXT, doc INTEGER, emoji TEXT, about TEXT, n INTEGER, after TEXT, last REAL, PRIMARY KEY (chat, doc));
@@ -375,6 +376,15 @@ class Store:
     def finish_reminder(self, reminder_id: int) -> None:
         self.db.execute("UPDATE reminders SET done = 1 WHERE id = ?", (reminder_id,))
         self.db.commit()
+
+    def log_phone(self, kind: str, cost: float) -> None:
+        """An SMS or a robot call to the owner's phone, for the daily limit and the bill."""
+        self.db.execute("INSERT INTO phone (ts, kind, cost) VALUES (?, ?, ?)", (time.time(), kind, cost))
+        self.db.commit()
+
+    def phone_since(self, ts: float) -> tuple[int, float]:
+        row = self.db.execute("SELECT COUNT(*), COALESCE(SUM(cost), 0) FROM phone WHERE ts >= ?", (ts,)).fetchone()
+        return row[0], row[1]
 
     def fave_add(self, kind: str, doc: int, desc: str) -> int:
         row = self.db.execute("SELECT id FROM faves WHERE kind = ? AND doc = ?", (kind, doc)).fetchone()

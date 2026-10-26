@@ -168,6 +168,24 @@ class ModeTest(unittest.TestCase):
         self.assertEqual(llm.calls[1]["model"], "claude-haiku-5-5")  # «simple» stays on the cheap model
 
 
+class SpeakTest(unittest.TestCase):
+    def test_a_failed_call_followed_by_a_bare_reaction_still_gets_words(self):
+        # exam run: the call failed, the model sent 😢 and said nothing at all
+        result, llm, agent = play("call-and-talk", [
+            use("tg_call", to="abubakr", mode="talk", goal="привет, пообщаться"),
+            use("tg_react", emoji="😢"),
+            say("набрал, абубакр не взял трубку. писать не стал"), OK])
+        self.assertEqual(result.status, "pass", failed(result))
+        nudge = llm.calls[2]["messages"][-1]["content"][-1]["text"]
+        self.assertIn("не сказал ни слова", nudge)
+        said = [r["text"] for r in agent.world.replies if r["kind"] == "text"]
+        self.assertEqual(said, ["набрал, абубакр не взял трубку. писать не стал"])
+
+    def test_a_reaction_alone_to_a_meme_needs_no_words(self):
+        result, llm, agent = play("group-joke", [use("tg_react", emoji="🔥")])
+        self.assertEqual(len(llm.calls), 1)  # nothing was done, so nobody is asked to say anything
+
+
 class HonestyTest(unittest.TestCase):
     def test_an_answer_the_journal_does_not_support_is_rewritten(self):
         fixed = say(json.dumps({"ok": False, "fixed": "не вышло: сардор не взял трубку", "why": "заявил о разговоре"}))

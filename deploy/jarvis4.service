@@ -1,0 +1,19 @@
+[Unit]
+Description=Jarvis 4
+After=network-online.target
+Wants=network-online.target
+# One Telegram session, one process: starting this stops the old bot and the other way round is done by rollback.sh
+Conflicts=jarvis.service
+
+[Service]
+User=administrator
+WorkingDirectory=/opt/jarvis
+EnvironmentFile=/opt/jarvis/.env
+# The old bot shares .env and its DAILY_LIMIT is not the owner's limit for this one
+Environment=J4_DAILY_LIMIT=2 PYTHONUNBUFFERED=1
+ExecStart=/opt/jarvis/.venv/bin/python -m jarvis4
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

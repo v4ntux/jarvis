@@ -111,7 +111,7 @@ class Account:
         self.core: Core | None = None
         self.client: TelegramClient | None = None
         self.taste: Taste | None = None
-        self.calls = None  # stage 5
+        self.callapi = None  # tg.callapi.CallApi once the account is up and Gemini Live is configured
         self.me_id = 0
         self.ready = False
         self._outs: dict[str, ChatOut] = {}
@@ -177,8 +177,17 @@ class Account:
         self.ready = True
         self._spawn(self.taste.warm())
         self._spawn(self._sync_people())
-        log.info("own account %s is up", user_name(me))
+        from .callapi import CallApi
+        api = CallApi(self, core, cfg, self.store)
+        if await api.start():
+            self.callapi = api
+        log.info("own account %s is up, calls %s", user_name(me), "on" if self.callapi else "off")
         return True
+
+    @property
+    def calls(self):
+        """The call machinery when calls work, else None (the owner's «ring me» paths check this)."""
+        return self.callapi.calls if self.callapi else None
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -397,6 +406,8 @@ class Account:
         from telethon.errors import (ChatWriteForbiddenError, FloodWaitError, PeerFloodError, UserBannedInChannelError,
                                      UserIsBlockedError)
 
+        if fake := self.dry("send", f"{chat}: {text[:120]}" + (f" +{len(files)} файл." if files else "")):
+            return fake
         entity = await self.entity(chat)
         reply_to = self.parse(reply_ref)[1] if reply_ref else None
         try:
@@ -426,8 +437,33 @@ class Account:
         first = sent[0] if isinstance(sent, list) else sent
         return self.ref(chat, first.id)
 
+    def dry(self, what: str, detail: str = "") -> str:
+        """Rehearsal mode: nothing leaves the account, it is only logged, and a made-up ref comes back so the tools
+        carry on as if it had worked. Empty when the mode is off."""
+        if not self.cfg.dry_run:
+            return ""
+        self._fake = getattr(self, "_fake", 0) + 1
+        log.info("DRY %s %s", what, detail)
+        return f"dry/{self._fake}"
+
+    async def send_voice(self, chat: str, text: str) -> str:
+        """A voice message: Edge TTS on the server, sent as a voice note."""
+        if fake := self.dry("voice", f"{chat}: {text[:120]}"):
+            return fake
+        from ..ops import voice
+
+        path = await voice.synthesize(text)
+        try:
+            sent = await self.client.send_file(await self.entity(chat), path, voice_note=True)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+        return self.ref(chat, sent.id)
+
     async def edit(self, ref: str, text: str) -> None:
         from telethon.errors import RPCError
+        if self.dry("edit", ref):
+            return
         chat, msg_id = self.parse(ref)
         try:
             await self.client.edit_message(await self.entity(chat), msg_id, text, parse_mode=None, link_preview=False)
@@ -436,6 +472,8 @@ class Account:
 
     async def delete(self, ref: str) -> None:
         from telethon.errors import RPCError
+        if self.dry("delete", ref):
+            return
         chat, msg_id = self.parse(ref)
         try:
             await self.client.delete_messages(await self.entity(chat), [msg_id])
@@ -482,6 +520,8 @@ class Account:
     async def forward(self, refs: list[str], to: str) -> list[str]:
         from telethon.errors import RPCError
 
+        if self.dry("forward", f"{refs} → {to}"):
+            return [f"dry/{self._fake}.{i}" for i, _ in enumerate(refs)]
         target = await self.entity(to)
         by_chat: dict[str, list[int]] = {}
         for ref in refs:
@@ -502,6 +542,8 @@ class Account:
         from telethon.tl.functions.messages import SendReactionRequest
         from telethon.tl.types import ReactionEmoji
 
+        if self.dry("react", f"{ref} {emoji}"):
+            return
         chat, msg_id = self.parse(ref)
         try:
             await self.client(SendReactionRequest(peer=await self.entity(chat), msg_id=msg_id,
@@ -510,17 +552,23 @@ class Account:
             pass  # Telegram refuses emoji it does not offer: a missing like is not an error
 
     async def sticker(self, chat: str, emoji: str, reply_ref: str = "") -> str:
+        if fake := self.dry("sticker", f"{chat} {emoji}"):
+            return fake
         sent = await self.taste.express(await self.entity(chat), chat, sticker=emoji,
                                         reply_to=self.parse(reply_ref)[1] if reply_ref else None)
         return self.ref(chat, sent.id) if sent else ""
 
     async def gif(self, chat: str, query: str, reply_ref: str = "") -> str:
+        if fake := self.dry("gif", f"{chat} {query}"):
+            return fake
         sent = await self.taste.express(await self.entity(chat), chat, gif=query,
                                         reply_to=self.parse(reply_ref)[1] if reply_ref else None)
         return self.ref(chat, sent.id) if sent else ""
 
     async def leave(self, chat: str) -> str:
         from telethon.errors import RPCError
+        if self.dry("leave", chat):
+            return "вышел (репетиция)"
         try:
             await self.client.delete_dialog(await self.entity(chat))
         except RPCError as e:
@@ -528,6 +576,8 @@ class Account:
         return "вышел"
 
     async def call(self, person: str, mode: str, goal: str) -> CallResult:
-        if self.calls is None:
-            raise TGError("звонки в Telegram сейчас не работают")
-        return await self.calls_api.call(person, mode, goal)  # set by the calls module (stage 5)
+        if self.dry("call", f"{person} {mode}: {goal[:100]}"):
+            return CallResult(True, "(репетиция) позвонил, ничего не отправлялось")
+        if self.callapi is None:
+            raise TGError("звонки в Telegram сейчас не работают (/status скажет почему)")
+        return await self.callapi.call(person, mode, goal)
