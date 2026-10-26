@@ -142,7 +142,7 @@ def system(core, itx: Interaction, role: str, goal: str = "") -> list[dict]:
     if itx.owner:
         lap = core.platform.laptop
         live.append("Ноутбук на связи." if lap is not None and lap.online else "Ноутбук сейчас НЕ подключён: его инструменты не работают.")
-        live.append(f"Потрачено сегодня ${core.budget.spent_today():.2f} из ${cfg.daily_limit:.2f}.")
+        live.append(f"Потрачено сегодня ${core.budget.spent_today():.2f} из ${core.budget.daily:.2f}.")
         recent = actions_lines(core)
         if recent:
             live.append("Твои последние действия (для вопросов «что ты делал», точные тексты через инструмент journal):\n"

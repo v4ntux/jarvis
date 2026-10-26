@@ -171,6 +171,46 @@ class CommandsTest(unittest.TestCase):
         self.assertFalse(self.app.core.queue)
 
 
+class LimitTest(unittest.TestCase):
+    def setUp(self):
+        self.app = make_app()
+        self.budget = self.app.core.budget
+
+    def say(self, text):
+        return run(self.app.commands.run(text))
+
+    def test_over_the_limit_the_owner_is_refused_until_he_resets(self):
+        from jarvis4.budget import OutOfMoney, Tier
+        self.app.store.log_usage("claude-sonnet-5-5", 1, 1, 2.5, "legacy")  # what the old bot had spent today
+        with self.assertRaises(OutOfMoney) as caught:
+            self.budget.pick(Tier.MOUTH)
+        self.assertIn("/limit reset", caught.exception.text)  # the refusal says how to get out of it
+        self.assertIn("сбросил", self.say("/limit reset"))
+        self.assertEqual(self.budget.pick(Tier.BRAIN), "claude-sonnet-5-5")
+        self.assertAlmostEqual(self.budget.spent_today(), 0.0)
+
+    def test_after_a_reset_new_spending_counts_again(self):
+        self.app.store.log_usage("claude-sonnet-5-5", 1, 1, 2.5, "legacy")
+        self.say("/limit reset")
+        self.app.store.log_usage("claude-haiku-5-5", 1, 1, 0.3, "mouth")
+        self.assertAlmostEqual(self.budget.spent_today(), 0.3)
+
+    def test_a_limit_for_today_moves_the_whole_ladder(self):
+        self.assertIn("$10.00", self.say("/limit 10"))
+        self.assertEqual((self.budget.daily, self.budget.soft), (10.0, 7.5))
+        self.app.store.log_usage("claude-sonnet-5-5", 1, 1, 5.0, "brain")
+        self.assertEqual(self.budget.pick(__import__("jarvis4.budget", fromlist=["Tier"]).Tier.BRAIN), "claude-sonnet-5-5")
+
+    def test_the_limit_for_today_is_gone_tomorrow(self):
+        self.app.store.meta_set("limit_today", "2020-01-01:50")  # set long ago
+        self.assertEqual(self.budget.daily, self.app.cfg.daily_limit)
+
+    def test_nonsense_is_explained(self):
+        self.assertIn("напиши так", self.say("/limit много"))
+        self.assertIn("от $0.2 до $100", self.say("/limit 1000"))
+        self.assertIn("потрачено", self.say("/limit"))
+
+
 class AlertsTest(unittest.TestCase):
     def setUp(self):
         self.app = make_app()

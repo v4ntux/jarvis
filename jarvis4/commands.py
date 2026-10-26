@@ -7,7 +7,7 @@ from . import clock, watch
 from .store import Store
 
 HELP = ("Просто пиши или говори, как человеку. Команды без ИИ: /stop стоп всему · /reset забыть разговор (факты и уроки "
-        "остаются) · /voice голосовые ответы вкл/выкл · /cost траты · /status что с чем · /monitor сайты и серверы · /screen скриншот ноутбука · "
+        "остаются) · /limit сбросить или поднять лимит на сегодня · /voice голосовые ответы вкл/выкл · /cost траты · /status что с чем · /monitor сайты и серверы · /screen скриншот ноутбука · "
         "/memory факты · /lessons уроки (/unlesson 3 — забыть урок) · /watchers наблюдатели (/unwatch 3) · /groups и "
         "/group 2 тихо|говори|выкл · /calltest позвонить в Telegram · /phonetest [call] SMS или звонок на телефон")
 GROUP_MODES = {"on": "говорит", "quiet": "тихо, только когда зовут", "off": "выключен"}
@@ -42,6 +42,24 @@ class Commands:
         self.store.fresh_start("owner")
         return "забыл разговор. факты, уроки и навыки на месте"
 
+    async def cmd_limit(self, arg: str) -> str:
+        """/limit shows the day's money; /limit reset counts from zero again; /limit 5 sets today's limit to $5."""
+        budget, word = self.app.core.budget, arg.strip().lower().replace(",", ".").lstrip("$")
+        if word in ("reset", "сброс", "сбрось", "0"):
+            had = budget.reset_count()
+            return f"сбросил: считаю с нуля (было ${had:.2f}). лимит на сегодня ${budget.daily:.2f}"
+        if word:
+            try:
+                amount = float(word)
+            except ValueError:
+                return "напиши так: /limit reset, или /limit 5 (лимит на сегодня в долларах)"
+            if not 0.2 <= amount <= 100:
+                return "лимит от $0.2 до $100"
+            budget.set_today(amount)
+            return f"лимит на сегодня ${amount:.2f} (завтра вернётся ${self.app.cfg.daily_limit:.2f}). потрачено ${budget.spent_today():.2f}"
+        return (f"потрачено ${budget.spent_today():.2f} из ${budget.daily:.2f} на сегодня. /limit reset обнуляет счёт, "
+                f"/limit 5 ставит лимит на сегодня. Постоянно: J4_DAILY_LIMIT в службе (сейчас ${self.app.cfg.daily_limit:.2f})")
+
     async def cmd_voice(self, arg: str) -> str:
         core = self.app.core
         core.voice_replies = not core.voice_replies
@@ -51,7 +69,7 @@ class Commands:
         app, today = self.app, clock.day_start()
         used, rub = self.store.phone_since(today)
         return (app.core.budget.summary() + f"\nВсего за всё время: ${self.store.spent_since(0):.3f}\n"
-                f"Лимит ${app.cfg.daily_limit:.2f} в день; после ${app.cfg.soft_limit:.2f} отвечает только дешёвая модель, "
+                f"Лимит ${app.core.budget.daily:.2f} в день; после ${app.core.budget.soft:.2f} отвечает только дешёвая модель, "
                 f"резерв Вану ${app.cfg.owner_reserve:.2f}.\nSMS и звонки на телефон сегодня: {used} из "
                 f"{app.cfg.phone_daily_limit}, {rub:.2f} ₽")
 
@@ -67,7 +85,7 @@ class Commands:
                  f"SMS и звонки на телефон: {'настроены' if app.phone.ready else 'не настроены'}",
                  f"Телефон (Android): {'на связи' if app.android and app.android.online else 'не подключён' if app.android else 'не настроен'}",
                  "Другие серверы: " + (", ".join(app.ssh.names()) or "нет"),
-                 f"Сегодня потрачено ${app.core.budget.spent_today():.3f} из ${app.cfg.daily_limit:.2f}"]
+                 f"Сегодня потрачено ${app.core.budget.spent_today():.3f} из ${app.core.budget.daily:.2f}"]
         if app.cfg.dry_run:
             lines.append("⚠️ РЕПЕТИЦИЯ: ничего реально не отправляю, только пишу в журнал")
         if app.core.frozen():
