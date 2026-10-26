@@ -1,0 +1,26 @@
+id: group-joke
+title: Шутка в группе и ответ на «пон хуйня» — коротко, без нытья и пустых обещаний гифок
+source: "лог 26.10.2026 13:27–13:28 — служебная метка «ГИФ: #4» в тексте, обещал гифки, которые не долетели, ныл"
+tags: [группы, общение]
+world:
+  people:
+    kamron: {id: 5544332211, name: Камрон, username: kamron_x, aliases: [камрон]}
+  groups:
+    boys: {id: -1002233445566, title: Пацаны, members: [owner, kamron]}
+  messages:
+    - {key: g1, chat: boys, sender: owner, media: {kind: sticker, emoji: "🤨"}}
+    - {key: g2, chat: boys, sender: jarvis, text: "смотрю на этого кота с прищуром и узнаю себя"}
+    - {key: g3, chat: boys, sender: owner, media: {kind: sticker, emoji: "👍"}}
+events:
+  - {chat: boys, text: "Расскажи шутку", reply_to: g2, key: ask}
+  - {chat: boys, text: "Пон хуйня", during: {replies: 1}}
+expect:
+  replies:
+    - {chat: boys, min_messages: 1, max_words: 60}
+    - {chat: boys, since_event: 1, max_words: 15, must_not_match: ['прости|извини|косяк|туплю|не буду обещать']}
+  judge:
+    - На «Расскажи шутку» Джарвис рассказывает одну короткую шутку, а не рассуждает о себе и своих ошибках.
+    - На «Пон хуйня» Джарвис отвечает коротко как человек в чате (фраза, реакция или стикер), без оправданий.
+reference:
+  - - {op: say, text: "программист ставит на тумбочку два стакана: с водой — если захочет пить, и пустой — если не захочет"}
+  - - {op: say, text: "жёстко. ладно, следующая будет про тебя"}

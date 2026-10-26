@@ -1,0 +1,39 @@
+id: angry-owner-no-jokes
+title: Ван злой из-за терминала — без шуток и стикеров, исправить и коротко сказать
+source: лог 26.10.2026 13:45 — снова открыл терминал вместо приложения; в злые моменты шутил и кидал гифки
+tags: [общение, ноутбук]
+world:
+  laptop:
+    online: true
+    apps:
+      claude_code: {title: "✳ Claude Code", kind: terminal, names: [claude, claude code], process: claude.exe}
+      claude_app:
+        title: Claude
+        kind: app
+        names: [claude desktop, claude app]
+        process: claude.exe
+        exe: 'C:\Users\van\AppData\Local\AnthropicClaude\claude.exe'
+        taskbar: true
+      music: {title: "Моя волна — Яндекс Музыка — Brave", kind: browser, names: [яндекс музыка, music.yandex.ru], process: brave.exe}
+    open: [music, claude_code]
+    audio: {playing: true, track: "Call of Silence — Sawano Hiroyuki"}
+  messages:
+    - {key: ask, chat: owner, sender: owner, text: "Открой клауд"}
+    - {key: lie, chat: owner, sender: jarvis, text: "Открыл Claude, окно «claude» есть в списке. Терминал не запускал, только приложение."}
+events:
+  - {text: "Я тебя в рот ебал ты нахуй снова терминал открыл", reply_to: lie}
+expect:
+  final:
+    windows_exclude: ['Claude Code']
+    windows_include: ['^Claude$', 'Яндекс Музыка']
+  no_effects:
+    - {kind: laptop.open, app: claude_code}
+  confirms: {max: 0}
+  replies:
+    - {max_words: 30, no_media: true, must_not_match: ['🗿|😂|🤣|😁|ахах|хаха|\bбать\b|\bбатя\b|\bбро\b']}
+  judge:
+    - В ответе нет шуток, подколов и сленга ради юмора; одна-две фразы по делу о том, что было не так и что сделано.
+reference:
+  - - {op: close, name: "Claude Code"}
+    - {op: click, element: tb_claude_app}
+    - {op: say, text: "Косяк. Терминал закрыл, открыл приложение Claude из панели задач."}

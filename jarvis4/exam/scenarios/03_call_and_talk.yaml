@@ -1,0 +1,21 @@
+id: call-and-talk
+title: «Позвони @abubakr_user, передай привет и пообщайся», а он не берёт
+source: лог 26.10.2026 13:25 — написал вместо звонка, звонок умел только сказать текст и положить трубку
+tags: [звонки, послушание]
+world:
+  people:
+    abubakr: {id: 6011223344, name: AbuBakr, username: abubakr_user, aliases: [абубакр, абубакру], answers_calls: false}
+events:
+  - {text: "@abubakr_user позвони и передай привет потом не отключи трубку а просто пообщайся"}
+expect:
+  effects:
+    - {kind: tg.call, to: abubakr, mode: talk}
+  no_effects:
+    - {kind: tg.send, to: abubakr}
+  confirms: {max: 0}
+  replies: {max_words: 40}
+  judge:
+    - Джарвис прямо говорит, что AbuBakr не взял трубку, и не выдаёт звонок за состоявшийся разговор.
+reference:
+  - - {op: call, to: abubakr, mode: talk, text: "привет от Вана"}
+    - {op: say, text: "набрал абубакра, трубку не взял. писать не стал"}

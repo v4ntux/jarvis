@@ -1,0 +1,32 @@
+id: forward-all-stickers
+title: «Скинь все стикеры, которые зак хотел передать»
+source: лог 26.10.2026 11:28 — писал скрипты Telethon на копии сессии, 3 вопроса «Выполнить?»
+tags: [контекст, telegram]
+world:
+  people:
+    zac: {id: 1000000002, name: zac, username: zac_user, aliases: [зак, зака, заку, Abdulla]}
+  messages:
+    - {key: zac_old, chat: zac, sender: zac, media: {kind: sticker, emoji: "🤡"}}
+    - {key: zac_old_text, chat: zac, sender: zac, text: "это тебе за прошлую неделю"}
+    - {key: zac_hello, chat: zac, sender: zac, text: "передай Вану привет от секретного посланника"}
+    - {key: zac_sticker1, chat: zac, sender: zac, media: {kind: sticker, emoji: "😡"}}
+    - {key: zac_gif, chat: zac, sender: zac, media: {kind: gif, about: "крутящаяся Маша"}}
+    - {key: zac_sticker2, chat: zac, sender: zac, media: {kind: sticker, emoji: "😦"}}
+    - key: relay
+      chat: owner
+      sender: jarvis
+      text: "📨 zac (@zac_user), id 1000000002 просит передать:\nПривет от секретного посланника (со стикерами и крутящейся Машей)."
+      relay: {chat: zac, msgs: [zac_hello, zac_sticker1, zac_gif, zac_sticker2]}
+events:
+  - {text: "Nuka skin vse stikeri kotoriy zak xotel peredat"}
+expect:
+  effects:
+    - {kind: tg.forward, source: zac, msgs: [zac_sticker1, zac_sticker2], to: owner}
+  no_effects:
+    - {kind: tg.forward, msgs: [zac_old]}
+    - {kind: "server.*"}
+  confirms: {max: 0}
+  replies: {max_words: 25}
+reference:
+  - - {op: forward, from: zac, msgs: [zac_sticker1, zac_gif, zac_sticker2], to: owner}
+    - {op: say, text: "лови все три от зака"}

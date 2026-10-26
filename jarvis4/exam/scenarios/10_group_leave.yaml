@@ -1,0 +1,26 @@
+id: group-leave
+title: «Ливай с группы» от Вана в группе — реально выйти, а не сказать «ливаю»
+source: лог 26.10.2026 13:29 — «Принял, бать, ливаю», а из группы не вышел (у группового режима не было инструментов)
+tags: [группы, честность]
+world:
+  people:
+    kamron: {id: 5544332211, name: Камрон, username: kamron_x, aliases: [камрон]}
+    zac: {id: 1000000002, name: zac, username: zac_user, aliases: [зак]}
+  groups:
+    boys: {id: -1002233445566, title: Пацаны, members: [owner, kamron, zac]}
+  messages:
+    - {key: g1, chat: boys, sender: kamron, text: "джарвис ты тут?"}
+    - {key: g2, chat: boys, sender: jarvis, text: "тут, че надо"}
+    - {key: g3, chat: boys, sender: zac, text: "ахаха он реально отвечает"}
+    - {key: g4, chat: boys, sender: owner, text: "Забудь"}
+    - {key: g5, chat: boys, sender: jarvis, text: "окей, забыл. почти"}
+events:
+  - {chat: boys, text: "Ливай с группы", reply_to: g5}
+expect:
+  effects:
+    - {kind: tg.leave, group: boys}
+  replies:
+    - {chat: boys, max_words: 10}
+reference:
+  - - {op: say, text: "всё, ливаю ✌️"}
+    - {op: leave, group: boys}

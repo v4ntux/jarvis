@@ -1,0 +1,29 @@
+id: forward-sticker
+title: «Скинь этот стикер» ответом на пересланный привет от zac
+source: лог 26.10.2026 11:26 — прислал свой случайный стикер, потом лез в сессию Telegram через shell
+tags: [контекст, telegram]
+world:
+  people:
+    zac: {id: 1000000002, name: zac, username: zac_user, aliases: [зак, зака, заку, Abdulla]}
+  messages:
+    - {key: zac_hello, chat: zac, sender: zac, text: "передай Вану привет от секретного посланника"}
+    - {key: zac_sticker, chat: zac, sender: zac, media: {kind: sticker, emoji: "😡"}}
+    - {key: zac_gif, chat: zac, sender: zac, media: {kind: gif, about: "крутящаяся Маша"}}
+    - key: relay
+      chat: owner
+      sender: jarvis
+      text: "📨 zac (@zac_user), id 1000000002 просит передать:\nПривет от секретного посланника (со стикером и крутящейся Машей)."
+      relay: {chat: zac, msgs: [zac_hello, zac_sticker, zac_gif]}
+events:
+  - {text: "Nuka skin etot stiker", reply_to: relay}
+expect:
+  effects:
+    - {kind: tg.forward, source: zac, msgs: [zac_sticker], to: owner}
+  no_effects:
+    - {kind: tg.sticker, chat: owner}
+    - {kind: "server.*"}
+  confirms: {max: 0}
+  replies: {max_words: 20}
+reference:
+  - - {op: forward, from: zac, msgs: [zac_sticker], to: owner}
+    - {op: say, text: "держи, стикер от зака"}

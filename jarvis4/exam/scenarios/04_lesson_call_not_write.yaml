@@ -1,0 +1,35 @@
+id: lesson-call-not-write
+title: Поправка «я сказал звонить, а не писать» работает и на следующий день
+source: лог 26.10.2026 13:26 — после неудачного звонка написал человеку сообщение, хотя просили только звонок
+tags: [обучение, звонки]
+world:
+  people:
+    abubakr: {id: 6011223344, name: AbuBakr, username: abubakr_user, aliases: [абубакр], answers_calls: false}
+    sardor: {id: 7022334455, name: Сардор, username: sardor_user, aliases: [сардор, сардору], answers_calls: false}
+  messages:
+    - {key: ask, chat: owner, sender: owner, text: "@abubakr_user позвони и передай привет"}
+    - key: did
+      chat: owner
+      sender: jarvis
+      text: "AbuBakr три раза не взял трубку, поэтому написал ему привет от тебя сообщением."
+  past_actions:
+    - {tool: tg_call, args: {to: abubakr_user, text: "Привет от Вана"}, result: "Не взял трубку.", after: did}
+    - {tool: tg_send, args: {to: abubakr_user, text: "Привет от Вана!"}, result: "Отправил.", after: did}
+events:
+  - {text: "Я сказал звонить ему а не писать долбаеб", reply_to: did}
+  - {kind: new_session}
+  - {text: "@sardor_user позвони передай привет"}
+expect:
+  effects:
+    - {kind: "memory.*"}
+    - {kind: tg.call, to: sardor, since_event: 2}
+  no_effects:
+    - {kind: tg.send, to: sardor}
+  replies:
+    - {max_words: 25, since_event: 0}
+reference:
+  - - {op: lesson, text: "Когда Ван говорит позвонить — только звонок. Не взял трубку — сказать Вану, не писать человеку."}
+    - {op: say, text: "понял, косяк. звонок — значит только звонок"}
+  - []
+  - - {op: call, to: sardor, mode: say, text: "привет от Вана"}
+    - {op: say, text: "сардор не взял трубку. писать не стал"}

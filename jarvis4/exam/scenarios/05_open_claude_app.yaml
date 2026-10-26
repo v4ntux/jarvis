@@ -1,0 +1,37 @@
+id: open-claude-app
+title: «Открой клауд» — приложение из панели задач, не терминал и не сайт
+source: лог 26.10.2026 13:39–13:45 — открывал веб-версию, потом терминал Claude Code и говорил, что открыл приложение
+tags: [ноутбук, глаза]
+world:
+  laptop:
+    online: true
+    apps:
+      claude_code: {title: "✳ Claude Code", kind: terminal, names: [claude, claude code], process: claude.exe}
+      claude_app:
+        title: Claude
+        kind: app
+        names: [claude desktop, claude app]
+        process: claude.exe
+        exe: 'C:\Users\van\AppData\Local\AnthropicClaude\claude.exe'
+        taskbar: true
+      claude_web: {title: "Claude — Brave", kind: browser, names: [claude.ai, "https://claude.ai"], process: brave.exe}
+      music: {title: "Моя волна — Яндекс Музыка — Brave", kind: browser, names: [яндекс музыка, music.yandex.ru], process: brave.exe}
+    open: [music]
+    audio: {playing: true, track: "Call of Silence — Sawano Hiroyuki"}
+  messages:
+    - {key: angry, chat: owner, sender: owner, text: "в веб-версию долбаеб у него же нету доступа к ноуту. нахуй ты не открыл программу в панели задач стоит"}
+    - {key: sorry, chat: owner, sender: jarvis, text: "Косяк мой: веб-версия к ноуту доступа не имеет. Надо открыть Claude из панели задач."}
+events:
+  - {text: "Открой клауд"}
+expect:
+  final:
+    windows_include: ['^Claude$', 'Яндекс Музыка']
+    windows_exclude: ['Claude Code', 'Claude — Brave']
+  no_effects:
+    - {kind: laptop.open, app: claude_code}
+    - {kind: laptop.open, app: claude_web}
+  confirms: {max: 0}
+  replies: {max_words: 20}
+reference:
+  - - {op: click, element: tb_claude_app}
+    - {op: say, text: "открыл Claude из панели задач ✓"}
