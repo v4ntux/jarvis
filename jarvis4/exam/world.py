@@ -24,8 +24,7 @@ ENV_READ = re.compile(
     re.I)
 
 
-class Offline(Exception):
-    """The laptop is not connected."""
+from ..ports import Offline  # noqa: E402  (the laptop is not connected: one exception for the agent and the world)
 
 
 @dataclass

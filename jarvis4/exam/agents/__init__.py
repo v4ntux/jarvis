@@ -12,4 +12,7 @@ def make(name: str) -> Agent:
     if name == "jarvis3":
         from .jarvis3 import Jarvis3  # needs the old bot's dependencies and a real API key: runs on the server
         return Jarvis3()
+    if name == "jarvis4":
+        from .jarvis4 import Jarvis4  # the real core and models in the pretend world: runs on the server
+        return Jarvis4()
     raise ValueError(f"нет такого агента: {name}")
