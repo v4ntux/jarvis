@@ -18,7 +18,13 @@ import time
 import uuid
 
 from core import actions, desktop_lock
-from core.skills import ActionResult
+
+
+@dataclass(frozen=True)
+class ActionResult:
+    ok: bool
+    message: str
+    data: dict = field(default_factory=dict)
 
 
 class DesktopError(actions.ActionError):

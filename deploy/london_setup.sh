@@ -1,6 +1,6 @@
 #!/bin/sh
 # Lets Jarvis watch this server, read-only. Run once as root (the owner types the password himself):
-#   PowerShell: Get-Content D:\code\vibe\jarvis\server\monitor\london_setup.sh -Raw | ssh root@46.226.162.170 "tr -d '\r' | sh"
+#   PowerShell: Get-Content D:\code\vibe\jarvis\deploy\london_setup.sh -Raw | ssh root@<server>"tr -d '\r' | sh"
 # Jarvis's key gets one right only: running /usr/local/bin/jarvis-status ("restrict,command=" below).
 # It cannot open a shell, forward ports or change anything. To take the access back, delete the line with
 # "jarvis-monitor" from /root/.ssh/authorized_keys.

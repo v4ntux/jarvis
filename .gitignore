@@ -1,25 +1,27 @@
 # Environment & secrets
 .venv/
+.venv-test/
 .env
 
 # Python cache
 __pycache__/
 *.pyc
 
-# Build output
-build/
-dist/
-
-# Old code, design drafts, local data
-archive/
-.design/
-learned.json
-*.lnk
+# Local state of the laptop part (hands.py)
 hands.log
 apps.json
 routines.json
+*.lnk
+
+# The exam's reports
+jarvis4/exam/reports/
+
+# Local leftovers of earlier versions: not part of the repository
+archive/
+.design/
+build/
+dist/
+learned.json
+vision/
 .vision-venv/
 .vision-tmp/
-vision/models/
-jarvis4/exam/reports/
-.venv-test/

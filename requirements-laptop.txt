@@ -1,0 +1,8 @@
+# The laptop part (hands.py, core/), Windows only: pip install -r requirements-laptop.txt
+aiohttp>=3.9          # the connection to the server
+pillow>=10.0          # screenshots
+psutil>=5.9           # processes and windows
+pywin32>=306          # windows, clipboard, credentials
+pycaw>=20240210       # sound: volume and «is anything really playing»
+comtypes>=1.4         # UI Automation
+python-dotenv>=1.0    # settings

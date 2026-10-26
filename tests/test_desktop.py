@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 os.environ["JARVIS_SERVER_BRAIN"] = "0"  # tests never talk to the real server brain
-from core import desktop, desktop_lock, skills
+from core import desktop, desktop_lock
 
 
 class FakeNative:
@@ -289,16 +289,6 @@ class LeaseTests(unittest.TestCase):
         try:
             with desktop_lock.acquire() as acquired:
                 self.assertFalse(acquired)
-        finally:
-            desktop_lock.IN_FLIGHT.clear()
-
-    def test_volume_can_run_while_desktop_provider_is_busy(self):
-        desktop_lock.IN_FLIGHT.set()
-        try:
-            with mock.patch.object(skills, "_execute_unlocked", return_value=skills.ActionResult(True, "done")) as execute:
-                self.assertTrue(skills.execute("get_volume").ok)
-                self.assertFalse(skills.execute("open_app", {"name": "test"}).ok)
-            execute.assert_called_once_with("get_volume", None)
         finally:
             desktop_lock.IN_FLIGHT.clear()
 

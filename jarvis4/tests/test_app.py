@@ -446,6 +446,18 @@ class VoiceReplyTest(unittest.TestCase):
         self.assertEqual(self.out.said, ["ответ"])
 
 
+class LoginTest(unittest.TestCase):
+    def test_without_telegram_keys_it_says_where_to_get_them(self):
+        import os
+        from unittest import mock
+
+        from jarvis4 import login
+        with mock.patch.dict(os.environ, {"TG_API_ID": "", "TG_API_HASH": ""}):
+            with self.assertRaises(SystemExit) as caught:
+                run(login.main())
+        self.assertIn("my.telegram.org", str(caught.exception))
+
+
 class CaptureOutTest(unittest.TestCase):
     def test_the_answer_is_kept_for_the_laptop_to_read_aloud(self):
         copy = FakeOut()

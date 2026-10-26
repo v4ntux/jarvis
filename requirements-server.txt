@@ -1,0 +1,14 @@
+# Jarvis 4 on the server (Python 3.14): .venv/bin/pip install -r requirements-server.txt
+# System packages as well: ffmpeg (video and pictures for Gemini, scaling phone screenshots), adb (only for an Android
+# phone), tailscale (the link to the laptop and the phone).
+anthropic>=0.40       # Claude: the mouth, the brain, the eyes (computer use), the answer check
+telethon>=1.40        # the agent's own Telegram account
+py-tgcalls>=3.0       # Telegram voice calls (ntgcalls comes with it)
+aiohttp>=3.9          # the laptop hub, Gemini Live over a websocket
+httpx>=0.27           # Gemini, SMSC, site monitoring
+numpy>=1.26           # call audio
+ddgs>=9.0             # free web search
+trafilatura>=2.0      # page text for read_url
+faster-whisper>=1.1   # voice messages when Gemini cannot hear them
+edge-tts>=7.0         # voice replies
+pyyaml>=6.0           # the exam's scenarios

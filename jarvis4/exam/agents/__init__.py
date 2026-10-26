@@ -5,13 +5,10 @@ from .base import Agent
 
 
 def make(name: str) -> Agent:
-    """scripted:reference | scripted:silent | jarvis3"""
+    """scripted:reference | scripted:silent | jarvis4"""
     if name.startswith("scripted:"):
         from .scripted import ReferenceAgent, SilentAgent
         return {"reference": ReferenceAgent, "silent": SilentAgent}[name.split(":", 1)[1]]()
-    if name == "jarvis3":
-        from .jarvis3 import Jarvis3  # needs the old bot's dependencies and a real API key: runs on the server
-        return Jarvis3()
     if name == "jarvis4":
         from .jarvis4 import Jarvis4  # the real core and models in the pretend world: runs on the server
         return Jarvis4()

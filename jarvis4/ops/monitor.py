@@ -428,7 +428,7 @@ class Monitor:
 
 
 def setup_command(target_str: str) -> str:
-    return (f'Get-Content D:\\code\\vibe\\jarvis\\server\\monitor\\london_setup.sh -Raw | ssh {target_str} '
+    return (f'Get-Content D:\\code\\vibe\\jarvis\\deploy\\london_setup.sh -Raw | ssh {target_str} '
             '"tr -d \'\\r\' | sh"')
 
 

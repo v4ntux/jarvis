@@ -1,4 +1,4 @@
-"""python -m jarvis4.exam --agent jarvis3 [-k forward] [--no-judge] [--max-cost 0.5]"""
+"""python -m jarvis4.exam --agent jarvis4 [-k forward] [--no-judge] [--max-cost 0.5]"""
 import argparse
 import asyncio
 import os
@@ -13,7 +13,7 @@ REPORTS = os.path.join(os.path.dirname(__file__), "reports")
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m jarvis4.exam", description="Экзамен Джарвиса")
     parser.add_argument("--agent", default="scripted:reference",
-                        help="scripted:reference | scripted:silent | jarvis3")
+                        help="scripted:reference | scripted:silent | jarvis4")
     parser.add_argument("-k", default="", help="только сценарии, в id или имени файла которых есть эта строка")
     parser.add_argument("--no-judge", action="store_true", help="без судьи-модели: только проверки кодом, бесплатно")
     parser.add_argument("--max-cost", type=float, default=0.5, help="остановиться, когда потрачено столько $")

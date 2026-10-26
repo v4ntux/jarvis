@@ -76,8 +76,8 @@ Telegram (личка, группы, звонки)   ноутбук (hands.py)   
 
 ```sh
 sh deploy/push.sh                                  # с ноутбука: загрузить код на сервер
-ssh administrator@85.190.96.176 sh /opt/jarvis/deploy/cutover.sh   # бэкап, остановить старого, перенести данные, запустить
-ssh administrator@85.190.96.176 sh /opt/jarvis/deploy/rollback.sh  # вернуть старого бота (Jarvis 3)
+ssh <пользователь>@<сервер> sh /opt/jarvis/deploy/cutover.sh   # бэкап, остановить старого, перенести данные, запустить
+ssh <пользователь>@<сервер> sh /opt/jarvis/deploy/rollback.sh  # вернуть старого бота (Jarvis 3)
 journalctl -u jarvis4 -f                           # логи
 ```
 
@@ -107,7 +107,7 @@ journalctl -u jarvis4 -f                           # логи
 ## Другие серверы
 
 Ключ на сервер Ван кладёт сам (Джарвис не заводит доступы). Лондонский VPS читается ограниченным ключом (только статус,
-`server/monitor/london_setup.sh`, один раз). Полный доступ к другому серверу: создать ключ, добавить его в `authorized_keys`
+`deploy/london_setup.sh`, один раз). Полный доступ к другому серверу: создать ключ, добавить его в `authorized_keys`
 того сервера, затем указать в `.env`:
 `JARVIS_NODES={"servers": {"home": {"target": "user@host", "key": "/opt/jarvis/data/keys/home", "mode": "full"}}}`.
 

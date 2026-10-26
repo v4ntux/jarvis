@@ -5,69 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import actions, autostart, skills
-
-
-class ExecutionTests(unittest.TestCase):
-    def setUp(self):
-        permission = mock.patch.object(skills.memory, "permission", return_value={
-            "enabled": True, "always_confirm": False})
-        permission.start()
-        self.addCleanup(permission.stop)
-
-    def test_internal_typeerror_never_reexecutes_action(self):
-        action = mock.Mock(side_effect=TypeError("an internal failure"))
-        skill = skills.Skill("test_once", "test", {"text": skills._spec("text")}, run=action)
-        with mock.patch.dict(skills.SKILLS, {skill.name: skill}), \
-                self.assertLogs("core.skills", level="WARNING"):
-            result = skills.execute(skill.name, {"text": "requested"})
-        self.assertFalse(result.ok)
-        action.assert_called_once_with(text="requested")
-
-    def test_action_error_is_structured_failure(self):
-        with mock.patch.object(actions, "open_app", side_effect=actions.ActionError("Окно не найдено")):
-            result = skills.execute("open_app", {"name": "missing"})
-        self.assertFalse(result.ok)
-        self.assertEqual(result.message, "Окно не найдено")
-
-    def test_disabled_action_is_never_executed(self):
-        with mock.patch.object(skills.memory, "permission", return_value={"enabled": False}), \
-                mock.patch.object(actions, "open_app") as launch:
-            result = skills.execute("open_app", {"name": "test"})
-        self.assertFalse(result.ok)
-        launch.assert_not_called()
-
-    def test_invalid_values_are_not_coerced_into_commands(self):
-        invalid = [("type_text", {"text": None}), ("type_text", {"text": 17}),
-                   ("mute", {"on": "nonsense"}), ("set_volume", {"percent": 12.4}),
-                   ("set_volume", {"percent": float("nan")}),
-                   ("set_volume", {"percent": float("inf")}),
-                   ("set_volume", {"percent": True}),
-                   ("open_app", {"name": "test", "unexpected": "value"}),
-                   ("media", {"what": "invalid"}), ("scroll", {"direction": "diagonal"})]
-        for name, params in invalid:
-            with self.subTest(name=name, params=params), self.assertRaises(ValueError):
-                skills.validate_params(name, params)
-
-    def test_text_content_and_spacing_are_preserved(self):
-        text = '  Привет, мир!\nСледующая строка.  '
-        self.assertEqual(skills.validate_params("type_text", {"text": text})["text"], text)
-
-    def test_routine_preflight_checks_later_steps_before_running_first(self):
-        routine = {"steps": [{"skill": "time"}, {"skill": "shutdown"}]}
-        with mock.patch.object(skills.memory, "find_routine", return_value=routine), \
-                mock.patch.object(skills, "execute") as execute:
-            result = skills._run_routine("test")
-        self.assertFalse(result.ok)
-        execute.assert_not_called()
-
-    def test_routine_stops_on_failed_execution(self):
-        routine = {"steps": [{"skill": "time"}, {"skill": "date"}], "stop_on_error": True}
-        with mock.patch.object(skills.memory, "find_routine", return_value=routine), \
-                mock.patch.object(skills, "execute", return_value=skills.ActionResult(False, "failure")) as execute:
-            result = skills._run_routine("test")
-        self.assertFalse(result.ok)
-        execute.assert_called_once()
+from core import actions
 
 
 class InputTests(unittest.TestCase):
@@ -289,11 +227,6 @@ class ApplicationTests(unittest.TestCase):
         with mock.patch.object(actions.subprocess, "run", return_value=mock.Mock(returncode=1)):
             with self.assertRaises(actions.ActionError):
                 actions.power("cancel")
-
-    def test_source_autostart_uses_current_source(self):
-        target, arguments, workdir = autostart._target()
-        self.assertNotIn("dist", target.lower())
-        self.assertIn("jarvis.py", arguments)
 
 
 class ComAndClipboardTests(unittest.TestCase):

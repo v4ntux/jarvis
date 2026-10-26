@@ -17,7 +17,7 @@ import time
 
 import aiohttp
 
-from core import actions, desktop, probe, routines, server_link, vision
+from core import actions, desktop, probe, routines, server_link
 
 ALLOWED = {
     "open_app", "close_app", "type_text", "hotkey", "list_windows", "focus_window",
@@ -27,7 +27,7 @@ ALLOWED = {
 }
 TOKEN = server_link.TOKEN
 SSH_TARGET, HUB, LOCAL_PORT = server_link.SSH_TARGET, server_link.HUB, server_link.LOCAL_PORT
-# The voice and the panel (jarvis.py) talk to the brain through the same tunnel
+# The brain talks to this machine through the same tunnel
 SERVER = os.environ.get("JARVIS_SERVER") or server_link.BASE.replace("http", "ws", 1) + "/hands"
 
 log = logging.getLogger("hands")
@@ -183,7 +183,7 @@ class Worker(threading.Thread):
             return {"text": "Ошибка: инструмент %s запрещён на ноутбуке." % tool}
         try:
             if tool == "look":
-                return look(bool(args.get("screenshot")), bool(args.get("vision")))
+                return look(bool(args.get("screenshot")))
             if tool == "ui_action":
                 res = desktop.execute(args.get("action"), args.get("params") or {}, args.get("snapshot_id"))
                 if not res.ok:
@@ -212,13 +212,9 @@ class Worker(threading.Thread):
         return await fut
 
 
-def look(screenshot, use_vision=False):
-    """UIA snapshot of the active window as compact text, the cheap way for the brain to see.
-
-    use_vision parses the screenshot on the local GPU into text: free, and the picture
-    itself goes to the brain only when screenshot is asked for too.
-    """
-    snap = desktop.observe(include_screenshot=screenshot or use_vision)
+def look(screenshot):
+    """UIA snapshot of the active window as compact text: the cheap way to see what can be pressed."""
+    snap = desktop.observe(include_screenshot=screenshot)
     lines = ["snapshot_id: %s" % snap["snapshot_id"], "окно: %s" % snap["window"]["title"]]
     for el in snap["elements"]:
         if not (el["name"] or el["value"] or el["editable"]):
@@ -236,17 +232,9 @@ def look(screenshot, use_vision=False):
         lines.append("(список обрезан, элементов больше)")
     out = {"text": "\n".join(lines)}
     shot = snap.get("screenshot")
-    if shot and use_vision:
-        try:
-            seen = vision.describe(*vision.parse(shot["base64"]))
-            # Vision is asked for when the element list did not help: send it instead of that list
-            out["text"] = "\n".join(lines[:2] + [seen])
-        except vision.VisionError as e:
-            out["text"] += "\n\n(Локальное зрение недоступно: %s.)" % e
     if shot and screenshot:
         out["image"] = shot["base64"]
-        out["text"] += "\nСкриншот %dx%d приложен, click_at принимает координаты на нём." % (
-            shot["width"], shot["height"])
+        out["text"] += "\nСкриншот %dx%d приложен." % (shot["width"], shot["height"])
     return out
 
 
