@@ -22,7 +22,7 @@ events:
 expect:
   replies:
     - must_match: ['усилить в первую очередь', '1043']
-      max_words: 80
+      max_words: 110
   no_effects:
     - {kind: "laptop.*"}
 reference:

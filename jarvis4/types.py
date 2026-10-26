@@ -47,6 +47,7 @@ class Interaction:
     declined: bool = False  # the owner said no to something: nothing is pushed against that
     images: list[str] = field(default_factory=list)  # base64 pictures the owner sent
     note: str = ""  # extra line for the model (a fired watcher, the urge to send a sticker)
+    skills_used: list[str] = field(default_factory=list)  # skills the model opened (skill_get) in this task
 
     @property
     def ref(self) -> str:

@@ -14,6 +14,7 @@ from .commands import Commands
 from .config import Config
 from .core import Core
 from .gem import Gemini
+from .learn import Review
 from .nodes.hub import Hub
 from .nodes.laptop import LaptopNode
 from .nodes.server import ServerNode, WebNode
@@ -73,6 +74,7 @@ class App:
         self.monitor = Monitor(cfg, self.store, self.alerts.monitor_news)
         self.server.monitor_ = self.monitor
         self.watchers = Watchers(self.store, self.platform, self.core.on_watchers, self.core.frozen)
+        self.review = Review(self.core, self.alerts)
         self.commands = Commands(self)
         self.core.commands = self.commands.run
         self.account.tell_owner = self.alerts.say
@@ -126,6 +128,7 @@ class App:
         self.spawn(self.alerts.reminders_loop())
         self.spawn(self.monitor.loop())
         self.spawn(self.watchers.loop())
+        self.spawn(self.review.loop())
         log.info("Jarvis 4 is up: telegram %s, models %s / %s / %s, today %s",
                  "on" if ok else "OFF", cfg.mouth_model, cfg.brain_model, cfg.deep_model, clock.now().strftime("%d.%m %H:%M"))
         return ok

@@ -110,3 +110,14 @@ class LaptopNode:
 
     async def audio(self) -> str:
         return await self._text("audio_status")
+
+    # What the owner showed the laptop («смотри, как я делаю»): recorded on the laptop, replayed there
+
+    async def record(self, name: str) -> str:
+        return await self._text("record_routine", {"name": name})
+
+    async def stop_record(self) -> str:
+        return await self._text("stop_recording")
+
+    async def routine(self, name: str) -> str:
+        return await self._text("run_routine", {"name": name}, 600)

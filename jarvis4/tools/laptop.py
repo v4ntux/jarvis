@@ -115,6 +115,18 @@ async def _clipboard(ctx, a, lap) -> Result:
     return Result(True, await lap.clipboard(a.get("text") if "text" in a else None))
 
 
+async def _routine(ctx, a, lap) -> Result:
+    """A recorded way of doing something, replayed on the laptop; the windows afterwards are the proof."""
+    if not hasattr(lap, "routine"):
+        return Result(False, "Ошибка: записанные приёмы здесь недоступны.")
+    out = await lap.routine(str(a.get("name", "")))
+    if out.startswith("Ошибка"):
+        return Result(False, out)
+    after = await lap.windows()
+    return Result(True, out + "\nОкна сейчас: " + (", ".join(describe(w) for w in after) or "нет") + ".",
+                  evidence="приём выполнен, окна: " + ", ".join(w.title for w in after)[:300])
+
+
 def tools() -> list[Tool]:
     return [
         Tool("laptop_shell", "Команда PowerShell на ноутбуке Вана с полным доступом: файлы, процессы, программы, git. "
@@ -140,6 +152,8 @@ def tools() -> list[Tool]:
              {"action": {"type": "string", "enum": ["play_pause", "next", "previous", "stop"]}}, ["action"],
              _wrap(_media), risk=Risk.OWN, label=lambda a, r: "плеер"),
         Tool("laptop_volume", "Громкость 0–100.", {"percent": I}, ["percent"], _wrap(_volume), risk=Risk.OWN),
+        Tool("laptop_routine", "Повторить записанный Ваном приём («смотри, как я делаю») на ноутбуке. Потом проверь результат "
+             "фактом.", {"name": S}, ["name"], _wrap(_routine), risk=Risk.OWN, label=lambda a, r: "повторяю приём"),
         Tool("laptop_clipboard", "Буфер обмена: без text — прочитать, с text — положить.", {"text": S}, [],
              _wrap(_clipboard), risk=Risk.OWN),
     ]

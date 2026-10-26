@@ -215,15 +215,18 @@ class AlertsTest(unittest.TestCase):
             before = len(self.rings)
             self.app.alerts.owner_seen()
             await asyncio.wait_for(task, 2)
-            return before
+            settled = len(self.rings)
+            await asyncio.sleep(0.3)  # long enough for several more rings, were it still ringing
+            return before, settled, len(self.rings)
 
         original = alerts_mod.ring_until_heard
         try:
-            before = run(scenario())
+            before, settled, final = run(scenario())
         finally:
             alerts_mod.ring_until_heard = original
         self.assertGreaterEqual(before, 2)
-        self.assertEqual(len(self.rings), before)  # no ring after he answered
+        self.assertLessEqual(settled, before + 1)  # a ring already on its way may finish
+        self.assertEqual(final, settled)  # but none starts after he answered
         self.assertTrue(self.voices)  # while he did not pick up, a voice message went too
 
     def test_an_alarm_escalates_to_sms_and_a_robot_call(self):

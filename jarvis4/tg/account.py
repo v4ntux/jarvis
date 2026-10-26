@@ -342,8 +342,12 @@ class Account:
                 text = (text + "\n" + extra).strip()
         if not text and not media_info:
             return None
-        if m.sticker and self.taste:
-            self.taste.saw_sticker(m)
+        if m.sticker:
+            if self.taste:
+                self.taste.saw_sticker(m)
+            before = self.store.recent(chat, 1)  # what the sticker answers, so it can be said back at a similar moment
+            self.store.sticker_seen(chat, m.sticker.id, ((m.file.emoji if m.file else "") or "").replace("️", ""),
+                                    (media_info or {}).get("about", ""), before[0].text if before else "")
         reply_ref = await self._reply_ref(m, chat)
         return Incoming(ref=self.ref(chat, m.id), chat=chat, sender=sender, text=text, media=media_info,
                         reply_ref=reply_ref, images=images, group=group, mentioned=bool(getattr(m, "mentioned", False)),

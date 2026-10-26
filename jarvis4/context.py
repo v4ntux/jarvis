@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 import time
 
-from . import clock, names, persona
+from . import clock, learn, names, persona
 from .store import Msg, Store
 from .types import Interaction, Mode
 
@@ -118,6 +118,9 @@ def system(core, itx: Interaction, role: str, goal: str = "") -> list[dict]:
         title = (st.chat(itx.chat) or ("", "группа", ""))[1]
         how = persona.GROUP_SELF if itx.spontaneous else persona.GROUP_CALLED
         parts.append(persona.GROUP.format(title=title, how=how))
+    style = learn.chat_style(st, itx.chat)  # what this company says and sends, learned from the chat itself
+    if style:
+        parts.append(style)
     if itx.owner:
         parts.append(persona.HOME)
         facts = st.facts()

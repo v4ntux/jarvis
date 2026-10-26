@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import clock, context, persona, verify, watch
+from . import clock, context, learn, persona, verify, watch
 from .agent import Agent, Outcome
 from .budget import Budget, Tier
 from .config import Config
+from .eyes import Eyes
 from .guard import Verdict
 from .llm import LLM
 from .ports import Platform
@@ -30,8 +32,14 @@ STOP = re.compile(r"^\W*(стоп|stop|стой|хватит|остановис�
                   r"бля|пожалуйста|все|всё|зоебал\w*|заебал\w*|ну))*\W*$", re.I)
 YES = re.compile(r"^\W*(да|ага|давай|делай|выполняй|ок|окей|ok|okay|yes|da|davay|конечно|можно)\W*$", re.I)
 NO = re.compile(r"^\W*(нет|не надо|не нужно|отмена|no|net|не делай)\W*$", re.I)
+MUTE = re.compile(r"(?<!\w)(?:заткнись|помолчи|замолчи|молчи|умолкни|тихо|не пиши|мут|shut up)(?!\w)", re.I)
+UNMUTE = re.compile(r"(?<!\w)(?:говори|можешь писать|можно писать|размуть\w*|врубай\w*|вернись)(?!\w)", re.I)
 NAME = re.compile(r"(?<!\w)(?:джарвис|жарвис|джарви|джарвик|jarvis|zharvis|dzharvis|jarvi)\w*", re.I)
 CONFIRM_SECONDS = 300
+SPONT_HOURLY = 8  # his own remarks per group per hour
+SPONT_DAILY = 60  # ... in all groups per day
+SPONT_GAP = 90  # seconds after his last word in a group before he may chip in on his own
+SPONT_TEXT, SPONT_MEDIA = 0.05, 0.22  # the chance he reacts to a message nobody addressed to him
 
 
 @dataclass
@@ -60,6 +68,8 @@ class Core:
         self.registry: dict[str, Tool] = all_tools()
         self.READ_TOOLS = {t.name for t in self.registry.values() if t.risk == Risk.READ}
         self.mouth, self.brain = Agent(self, "mouth"), Agent(self, "brain")
+        self.eyes = Eyes(self)
+        self.rng = random.Random()
         self.outs = outs  # chat key → how to talk in that chat (the transport sets it)
         self.frozen_until = 0.0
         self.queue: list[Incoming] = []
@@ -109,6 +119,8 @@ class Core:
     def ingest(self, inc: Incoming) -> Msg:
         if not inc.group and inc.sender != "owner":
             self.store.upsert_person(inc.sender, dialog=True)
+        if inc.sender != "jarvis" and inc.text:
+            self.store.count_words(inc.chat, learn.tokens(inc.text))
         return self.store.add_msg(inc.ref, inc.chat, inc.sender, inc.text, inc.media, inc.reply_ref, inc.forward_ref,
                                   ts=inc.ts)
 
@@ -229,6 +241,8 @@ class Core:
             await itx.out.say(f"споткнулся: {type(e).__name__}. гляну логи, если надо — скажи")
         finally:
             self.store.task_end(itx.id, status, itx.spent, answer)
+            for name in itx.skills_used:
+                self.store.skill_outcome(name, self._skills_ok(itx, status))
             await self._finish(itx)
 
     async def _finish(self, itx: Interaction) -> None:
@@ -270,18 +284,28 @@ class Core:
         if mode == "off":
             return
         addressed = self.called(inc) or self._in_conversation(inc)
+        switch = self.owner_switch(inc.text) if owner and addressed else None
+        if switch:  # «Джарвис, тихо» from the owner, right in the group
+            self.store.set_chat_mode(inc.chat, switch)
+            await self.platform.tg.react(inc.ref, "🫡" if switch == "quiet" else "🔥")
+            return
         if mode == "quiet" and not addressed:
             return
         if not addressed and not self.group_wants_to_speak(inc):
             return
-        itx = self._interaction([inc], "group", owner, spontaneous=not addressed)
-        itx.mode = persona.detect_mode(itx.text) if owner else Mode.CHAT
-        if owner and itx.mode == Mode.WORK:
-            itx.mode = Mode.WORK
-        if owner:
+        itx = self._interaction([inc], "group", owner and addressed, spontaneous=not addressed)
+        itx.mode = persona.detect_mode(itx.text) if owner and addressed else Mode.CHAT
+        if owner and addressed:
             await self.interact(itx, inc.reply_ref)
         else:
             await self._others(itx)
+
+    @staticmethod
+    def owner_switch(text: str) -> str | None:
+        text = text or ""
+        if UNMUTE.search(text):
+            return "on"
+        return "quiet" if MUTE.search(text) else None
 
     def called(self, inc: Incoming) -> bool:
         """Named, @mentioned, or answering one of Jarvis's own messages."""
@@ -296,7 +320,16 @@ class Core:
         return time.time() - when < 120 and (to == inc.sender or inc.sender == "owner")
 
     def group_wants_to_speak(self, inc: Incoming) -> bool:
-        return False  # stage 4: spontaneous remarks (caps, taste); until then he speaks only when called
+        """Nobody called him: sometimes he chips in like any member would. Rarely, with caps, never in a rush."""
+        now = time.time()
+        if now - self.group_last_spoke.get(inc.chat, (0.0, ""))[0] < SPONT_GAP:
+            return False
+        if self.store.count_msgs(inc.chat, "jarvis", now - 3600) >= SPONT_HOURLY:
+            return False
+        today = sum(self.store.count_msgs(key, "jarvis", clock.day_start()) for key, *_ in self.store.chats("group"))
+        if today >= SPONT_DAILY:
+            return False
+        return self.rng.random() < (SPONT_MEDIA if inc.media else SPONT_TEXT)
 
     async def _others(self, itx: Interaction) -> None:
         """Someone who is not the owner: the mouth with the few harmless tools and no view of the owner's world."""
@@ -327,6 +360,27 @@ class Core:
         text = f"📨 {label} просит передать:\n{note}"
         ref = await self.platform.tg.send("owner", text)
         self.store.add_msg(ref, "owner", "jarvis", text, relay={"chat": itx.chat, "msgs": source})
+
+    # ---- skills ------------------------------------------------------------------------------------------------
+
+    def skills_text(self, text: str) -> str:
+        """The skills Jarvis has, for the prompt: the model matches the request to them itself."""
+        rows = [s for s in self.store.skills() if s["status"] != "broken"][:40]
+        if not rows:
+            return ""
+        lines = ["Навыки (приёмы, которые уже работали). Подходит один из них: открой его через skill_get и следуй ему, "
+                 "а не придумывай заново. Сделал новое дело удачно: сохрани через skill_save:"]
+        lines += [f"- {s['name']} [{s['status']}]: {s['description'][:110]}" for s in rows]
+        return "\n".join(lines)
+
+    def _skills_ok(self, itx: Interaction, status: str) -> bool:
+        """A followed skill counts as worked when the task ended well and nothing failed after it was opened."""
+        if status != "done" or itx.declined:
+            return False
+        rows = self.store.journal(80, task=itx.id)
+        opened = next((i for i, r in enumerate(rows) if r["tool"] == "skill_get"), len(rows))
+        after = [r for r in rows[opened + 1:] if r["tool"] not in self.READ_TOOLS and r["tool"] != "skill_save"]
+        return bool(after) and all(r["ok"] for r in after[-3:])
 
     # ---- tools -------------------------------------------------------------------------------------------------
 

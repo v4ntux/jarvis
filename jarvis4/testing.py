@@ -44,7 +44,7 @@ class ScriptedLLM:
     async def complete(self, model, system, messages, tools=None, max_tokens=4000, effort="medium", kind="",
                        schema=None) -> Reply:
         self.calls.append({"model": model, "system": system, "messages": [dict(m) for m in messages],
-                           "tools": [t["name"] for t in tools or []], "kind": kind, "effort": effort})
+                           "tools": [t.get("name") or t.get("type") for t in tools or []], "kind": kind, "effort": effort})
         if not self.script:
             raise AssertionError(f"скрипт кончился; спросили {model} ({kind}); последнее: {messages[-1]!r:.300}")
         step = self.script.pop(0)

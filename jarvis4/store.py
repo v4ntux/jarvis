@@ -329,6 +329,82 @@ class Store:
         return self.db.execute("SELECT COALESCE(NULLIF(kind, ''), model), SUM(cost), COUNT(*) FROM usage WHERE ts >= ? "
                                "GROUP BY 1 ORDER BY 2 DESC", (ts,)).fetchall()
 
+    # ---- skills: ways of doing things that worked ---------------------------------------------------------------
+
+    @staticmethod
+    def skill_status(successes: int, failures: int) -> str:
+        """draft (never replayed), verified (worked once more), trusted (three times), broken (fails more than works)."""
+        if failures >= 2 and failures > successes:
+            return "broken"
+        return "trusted" if successes >= 3 else "verified" if successes >= 1 else "draft"
+
+    def skill_save(self, name: str, description: str, body: str) -> bool:
+        """Saves or rewrites a skill; a rewrite keeps the record of how it did but is a draft until it works again."""
+        old = self.skill(name)
+        if old:
+            self.db.execute("UPDATE skills SET description = ?, body = ?, status = 'draft', successes = 0, failures = 0 "
+                            "WHERE name = ?", (description, body, name))
+        else:
+            self.db.execute("INSERT INTO skills (name, description, body, status, last_used) VALUES (?, ?, ?, 'draft', ?)",
+                            (name, description, body, time.time()))
+        self.db.commit()
+        return old is None
+
+    def skill(self, name: str) -> dict | None:
+        row = self.db.execute("SELECT name, description, status, successes, failures, last_used, body FROM skills "
+                              "WHERE name = ?", (name,)).fetchone()
+        return dict(zip(("name", "description", "status", "successes", "failures", "last_used", "body"), row)) if row else None
+
+    def skills(self) -> list[dict]:
+        rows = self.db.execute("SELECT name, description, status, successes, failures, last_used, body FROM skills "
+                               "ORDER BY successes DESC, name").fetchall()
+        return [dict(zip(("name", "description", "status", "successes", "failures", "last_used", "body"), r)) for r in rows]
+
+    def skill_outcome(self, name: str, ok: bool) -> str:
+        """A skill was followed: it worked or it did not. Returns its new status."""
+        row = self.skill(name)
+        if row is None:
+            return ""
+        successes, failures = row["successes"] + ok, row["failures"] + (not ok)
+        status = self.skill_status(successes, failures)
+        self.db.execute("UPDATE skills SET successes = ?, failures = ?, status = ?, last_used = ? WHERE name = ?",
+                        (successes, failures, status, time.time(), name))
+        self.db.commit()
+        return status
+
+    def skill_forget(self, name: str) -> bool:
+        cur = self.db.execute("DELETE FROM skills WHERE name = ?", (name,))
+        self.db.commit()
+        return bool(cur.rowcount)
+
+    # ---- what a chat says and sends: the words and stickers its people use ---------------------------------------
+
+    def count_words(self, chat: str, words: list[str]) -> None:
+        now = time.time()
+        for word in words:
+            self.db.execute("INSERT INTO words (chat, word, n, last) VALUES (?, ?, 1, ?) "
+                            "ON CONFLICT (chat, word) DO UPDATE SET n = n + 1, last = excluded.last", (chat, word, now))
+        self.db.commit()
+
+    def top_words(self, chat: str, limit: int = 12, min_n: int = 3, within_days: int = 45) -> list[tuple[str, int]]:
+        return self.db.execute("SELECT word, n FROM words WHERE chat = ? AND n >= ? AND last >= ? "
+                               "ORDER BY n DESC, last DESC LIMIT ?",
+                               (chat, min_n, time.time() - within_days * 86400, limit)).fetchall()
+
+    def sticker_seen(self, chat: str, doc: int, emoji: str, about: str = "", after: str = "") -> None:
+        """A sticker somebody sent in a chat: how often, and what it answered (a thing to say it back to)."""
+        self.db.execute("INSERT INTO stickers_seen (chat, doc, emoji, about, n, after, last) VALUES (?, ?, ?, ?, 1, ?, ?) "
+                        "ON CONFLICT (chat, doc) DO UPDATE SET n = n + 1, last = excluded.last, "
+                        "about = CASE WHEN excluded.about != '' THEN excluded.about ELSE about END, "
+                        "after = CASE WHEN excluded.after != '' THEN excluded.after ELSE after END",
+                        (chat, doc, emoji, about, after[:120], time.time()))
+        self.db.commit()
+
+    def top_stickers(self, chat: str, limit: int = 5) -> list[tuple[str, int]]:
+        """(emoji, times) of the stickers this chat sends most."""
+        return self.db.execute("SELECT emoji, SUM(n) FROM stickers_seen WHERE chat = ? AND emoji != '' "
+                               "GROUP BY emoji ORDER BY SUM(n) DESC LIMIT ?", (chat, limit)).fetchall()
+
     # ---- meta, watchers, reminders, favorites ------------------------------------------------------------------
 
     def meta_get(self, key: str, default: str = "") -> str:
