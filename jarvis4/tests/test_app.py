@@ -328,6 +328,41 @@ class CallApiTest(unittest.TestCase):
             run(self.app.account.call("u77", "say", "привет"))
 
 
+class AnnounceTest(unittest.TestCase):
+    def app_with(self, llm):
+        app = make_app()
+        app.core.llm = llm
+        return app
+
+    class Broke:
+        ready = True
+
+        def __init__(self, kind):
+            self.kind = kind
+
+        async def complete(self, *a, **k):
+            from jarvis4.llm import LLMError
+            raise LLMError(self.kind, "x")
+
+    def test_no_money_is_said_at_once(self):
+        app = self.app_with(self.Broke("billing"))
+        run(app.announce())
+        self.assertTrue(any("кончились деньги" in s for s in app.out.said))
+        self.assertTrue(any("на связи" in s for s in app.out.said))
+
+    def test_a_restart_soon_after_is_not_announced_again(self):
+        app = self.app_with(self.Broke("busy"))
+        run(app.announce())
+        self.assertEqual(len(app.out.said), 1)
+        run(app.announce())
+        self.assertEqual(len(app.out.said), 1)  # still no money? nothing new to say; and no «на связи» twice in 30 minutes
+
+    def test_a_bad_key_is_said(self):
+        app = self.app_with(self.Broke("auth"))
+        run(app.announce())
+        self.assertTrue(any("ключ Anthropic" in s for s in app.out.said))
+
+
 class VoiceReplyTest(unittest.TestCase):
     def setUp(self):
         self.app = make_app()

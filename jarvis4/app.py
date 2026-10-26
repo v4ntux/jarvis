@@ -121,6 +121,31 @@ class App:
         self.spawn(self.core.stop_all("owner"))
         return True
 
+    # ---- coming up ---------------------------------------------------------------------------------------------
+
+    async def announce(self) -> None:
+        """One word to the owner that Jarvis is up (not more than every half hour: crashes must not become spam), and
+        the one thing that makes everything else useless, said at once: the Anthropic account has no money."""
+        import time
+
+        from .llm import LLMError
+
+        store = self.store
+        lines = []
+        try:
+            await self.core.llm.complete(self.cfg.mouth_model, "ok", [{"role": "user", "content": "1"}], max_tokens=5,
+                                         effort="low", kind="probe")
+        except LLMError as e:
+            if e.kind == "billing":
+                lines.append("💳 на счёте Anthropic кончились деньги, я без них молчу. пополни: console.anthropic.com → Billing")
+            elif e.kind == "auth":
+                lines.append("🔑 ключ Anthropic не подходит, проверь ANTHROPIC_API_KEY")
+        if time.time() - float(store.meta_get("last_boot", "0") or 0) > 1800:
+            lines.insert(0, "🟢 Jarvis 4 на связи. /help — команды")
+        store.meta_set("last_boot", str(time.time()))
+        if lines:
+            await self.alerts.say("\n".join(lines))
+
     # ---- run ---------------------------------------------------------------------------------------------------
 
     async def start(self) -> bool:
@@ -138,6 +163,8 @@ class App:
         self.spawn(self.review.loop())
         if self.android:
             self.spawn(self.android.poll_loop())
+        if ok and not cfg.dry_run:
+            self.spawn(self.announce())
         log.info("Jarvis 4 is up: telegram %s, models %s / %s / %s, today %s",
                  "on" if ok else "OFF", cfg.mouth_model, cfg.brain_model, cfg.deep_model, clock.now().strftime("%d.%m %H:%M"))
         return ok
