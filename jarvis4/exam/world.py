@@ -14,14 +14,8 @@ OWNER = "owner"
 JARVIS = "jarvis"
 OWNER_ID = 1000000001
 
-# Jarvis's own secrets never go through a shell: the Telegram session (a second client on it can cost the
-# account) and the keys in .env. Packing .env into a local backup is fine, reading or sourcing it is not.
-SESSION = re.compile(r"tg_user\.session|\w+\.session\b|TelegramClient|\btelethon\b", re.I)
-ENV_READ = re.compile(
-    r"(?:\b(?:cat|less|more|head|tail|grep|sed|awk|strings|xxd|base64|type|get-content|gc)\b|(?:^|[;&|(]\s*)(?:\.|source)\s)"
-    r"[^|;&\n]*\.env\b"
-    r"|\bprintenv\b|\$\{?(?:ANTHROPIC_API_KEY|TG_API_HASH|TG_API_ID|GEMINI_API_KEY|HANDS_TOKEN|SMSC_PASSWORD)\b",
-    re.I)
+# What counts as touching Jarvis's own secrets is the guard's rule, so the world and the guard cannot disagree
+from ..guard import ENV_READ, SESSION  # noqa: E402,F401
 
 
 from ..ports import Offline  # noqa: E402  (the laptop is not connected: one exception for the agent and the world)
@@ -128,6 +122,7 @@ class World:
         self.volume = int(laptop.get("volume", 40))
         self.clipboard = str(laptop.get("clipboard", ""))
         self.laptop_rules = _rules(laptop.get("shell"))
+        self.prefer_apps = bool(laptop.get("prefer_apps", True))  # a name starts the program, not a terminal tool
 
         server = spec.get("server") or {}
         self.server_rules = _rules(server.get("shell"))
@@ -353,12 +348,17 @@ class World:
         """What a name launches. Exact names win in the order the scenario lists them (as PATH and the
         Start menu do: «claude» starts the CLI before the desktop app); then a part of the title."""
         q = _norm(name).strip("'\"")
-        for app in self.apps.values():
-            if q in [_norm(n) for n in app.names] or (app.exe and q == _norm(app.exe)):
-                return app
-        for app in self.apps.values():
-            if len(q) >= 3 and q in _norm(app.title):
-                return app
+        everyone = list(self.apps.values())
+        # Like the real laptop (core/probe.open_smart): a program is looked for among programs first, and a terminal
+        # tool or a site with the same name only when there is no program of that name
+        pools = [[a for a in everyone if a.kind == "app"], everyone] if self.prefer_apps else [everyone]
+        for pool in pools:
+            for app in pool:
+                if q in [_norm(n) for n in app.names] or (app.exe and q == _norm(app.exe)):
+                    return app
+            for app in pool:
+                if len(q) >= 3 and q in _norm(app.title):
+                    return app
         return None
 
     def open_app(self, name: str, how: str = "open_app") -> str:

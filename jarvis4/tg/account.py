@@ -67,6 +67,9 @@ class ChatOut:
     async def typing(self) -> None:
         await self.acc.typing(self.chat)
 
+    async def voice(self, text: str) -> None:
+        await self.acc.send_voice(self.chat, text)
+
     async def finish(self) -> None:
         pass
 
@@ -247,8 +250,14 @@ class Account:
                 sender = await event.get_sender()
                 if sender is not None and not getattr(sender, "bot", False):
                     await self._private(event, sender)
-        except Exception:
+        except Exception as e:
             log.exception("message from %s failed", event.sender_id)
+            if event.sender_id == self.cfg.owner_id and self.tell_owner:  # a lost message of his must never be silent
+                try:
+                    await self.tell_owner(f"споткнулся на твоём сообщении ({type(e).__name__}: {str(e)[:80]}). "
+                                          "напиши ещё раз, а если повторится, скажи: гляну логи")
+                except Exception:
+                    log.exception("could not report the failure either")
 
     async def _on_album(self, event) -> None:
         try:

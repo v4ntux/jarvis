@@ -36,6 +36,7 @@ MUTE = re.compile(r"(?<!\w)(?:заткнись|помолчи|замолчи|м�
 UNMUTE = re.compile(r"(?<!\w)(?:говори|можешь писать|можно писать|размуть\w*|врубай\w*|вернись)(?!\w)", re.I)
 NAME = re.compile(r"(?<!\w)(?:джарвис|жарвис|джарви|джарвик|jarvis|zharvis|dzharvis|jarvi)\w*", re.I)
 CONFIRM_SECONDS = 300
+VOICE_MAX = 400  # longer answers are not read out
 SPONT_HOURLY = 8  # his own remarks per group per hour
 SPONT_DAILY = 60  # ... in all groups per day
 SPONT_GAP = 90  # seconds after his last word in a group before he may chip in on his own
@@ -70,6 +71,7 @@ class Core:
         self.mouth, self.brain = Agent(self, "mouth"), Agent(self, "brain")
         self.eyes = Eyes(self)
         self.rng = random.Random()
+        self.voice_replies = True  # a voice message from the owner gets a voice answer too (/voice)
         self.outs = outs  # chat key → how to talk in that chat (the transport sets it)
         self.frozen_until = 0.0
         self.queue: list[Incoming] = []
@@ -200,7 +202,8 @@ class Core:
                          if i.text or i.media).strip()
         itx = Interaction(kind=kind, chat=chat, sender=sender, text=text, msgs=msgs, owner=owner,
                           out=self.out_for(chat), spontaneous=spontaneous,
-                          images=[b for i in batch for b in i.images][:6])
+                          images=[b for i in batch for b in i.images][:6],
+                          spoken=any((i.media or {}).get("kind") == "voice" for i in batch))
         return itx
 
     async def _run_owner(self, batch: list[Incoming]) -> None:
@@ -267,6 +270,12 @@ class Core:
                                    task=itx.id)
         if itx.kind == "group":
             self.group_last_spoke[itx.chat] = (time.time(), itx.sender)
+        voice = getattr(itx.out, "voice", None)
+        if itx.spoken and itx.owner and self.voice_replies and voice and len(text) <= VOICE_MAX:
+            try:
+                await voice(text)
+            except Exception:  # a missing voice is not worth an error: the words were already sent
+                log.warning("voice reply failed", exc_info=True)
 
     # ---- strangers and groups ----------------------------------------------------------------------------------
 

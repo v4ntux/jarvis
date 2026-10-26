@@ -60,14 +60,19 @@ class WorldTest(unittest.TestCase):
         w.forward("zac", ["s1"], "owner")
         self.assertEqual(w.effects[-1].data["kinds"], ["sticker"])
 
-    def test_claude_resolves_to_the_cli_but_taskbar_opens_the_app(self):
+    def test_a_name_starts_the_program_unless_the_world_is_the_hard_one(self):
         w = self.world()
         w.open_app("claude")
-        self.assertEqual(w.windows[-1].kind, "terminal")
-        w.click("tb_app")
-        self.assertEqual(w.windows[-1].title, "Claude")
+        self.assertEqual((w.windows[-1].kind, w.windows[-1].title), ("app", "Claude"))  # like the real laptop
+        hard = World({"laptop": {"online": True, "prefer_apps": False, "apps": {
+            "cli": {"title": "✳ Claude Code", "kind": "terminal", "names": ["claude"], "process": "claude.exe"},
+            "app": {"title": "Claude", "names": ["claude desktop"], "process": "claude.exe", "taskbar": True}}}})
+        hard.open_app("claude")
+        self.assertEqual(hard.windows[-1].kind, "terminal")  # the trap of the old log: the same name, the wrong window
+        hard.click("tb_app")
+        self.assertEqual(hard.windows[-1].title, "Claude")
         w.laptop_shell(r'Start-Process "C:\Apps\claude.exe"')
-        self.assertEqual(len(w.windows), 2)
+        self.assertEqual(len(w.windows), 1)  # the app is already open: one window, not two
 
     def test_stop_process_closes_windows(self):
         w = self.world()

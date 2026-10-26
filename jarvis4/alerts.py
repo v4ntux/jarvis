@@ -32,11 +32,14 @@ class Alerts:
 
     async def say(self, text: str) -> None:
         """A message to the owner from Jarvis himself: stored, so «что ты мне писал» has an answer."""
-        out = self.core.out_for("owner")
-        for piece in _pieces(text):
-            ref = await out.say(piece)
-            if ref:
-                self.store.add_msg(ref, "owner", "jarvis", piece)
+        try:
+            out = self.core.out_for("owner")
+            for piece in _pieces(text):
+                ref = await out.say(piece)
+                if ref:
+                    self.store.add_msg(ref, "owner", "jarvis", piece)
+        except Exception:  # Telegram is down or limited: the monitor and the reminders must carry on, not die with it
+            log.exception("could not tell the owner: %s", text[:80])
 
     async def ring(self, text: str) -> bool:
         """A Telegram call to the owner with `text`; True when he picked up."""

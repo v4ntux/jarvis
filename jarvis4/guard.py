@@ -37,7 +37,8 @@ def deny(reason: str) -> Verdict:
 SESSION = re.compile(r"tg_user\.session|\w+\.session\b|TelegramClient|\btelethon\b", re.I)
 ENV_READ = re.compile(
     r"(?:\b(?:cat|less|more|head|tail|grep|sed|awk|strings|xxd|base64|type|get-content|gc)\b|(?:^|[;&|(]\s*)(?:\.|source)\s)"
-    r"[^|;&\n]*\.env\b"
+    # «.env» as a file: after a space, a slash or a Windows folder (C:\jarvis\.env), but not the escaped name in a pattern ("\.env")
+    r"[^|;&\n]*(?:(?<![\\\w])|(?<=[\w:.]\\))\.env\b"
     r"|\bprintenv\b|\$\{?(?:ANTHROPIC_API_KEY|TG_API_HASH|TG_API_ID|GEMINI_API_KEY|HANDS_TOKEN|SMSC_PASSWORD)\b",
     re.I)
 # Cutting himself off from the machine

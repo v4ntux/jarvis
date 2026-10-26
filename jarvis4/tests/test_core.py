@@ -73,15 +73,22 @@ class HandoffTest(unittest.TestCase):
 
     def test_a_terminal_that_opens_is_called_a_terminal(self):
         seen = []
-        result, llm, _ = play("open-claude-app", [
+        result, llm, _ = play("open-claude-wrong-first", [
             use("do_task", goal="Открой клауд"),
             use("laptop_open", name="claude"),
             lambda m, s, msgs, t: (seen.append(json.dumps(msgs[-1], ensure_ascii=False)), use("laptop_close", title="Claude Code"))[1],
-            use("laptop_click", element="tb_claude_app"), say("открыл приложение Claude"), OK])
-        # opening the terminal at all fails the scenario, but the result named it, so the model could undo it
-        self.assertEqual(result.status, "fail")
+            use("laptop_click", element="tb_claude_app"), say("открыл приложение Claude. сначала вылез терминал, закрыл"), OK])
+        # the result named the wrong window, so the model could undo it; in the end only the app is open
+        self.assertEqual(result.status, "pass", failed(result))
         self.assertIn("терминал", seen[0])
         self.assertIn("не приложение", seen[0])
+
+    def test_a_name_starts_the_program_not_the_terminal_tool_with_the_same_name(self):
+        # as on the real laptop (core/probe.open_smart): «claude» finds the app first
+        result, llm, _ = play("open-claude-app", [
+            use("do_task", goal="Открой клауд"), use("laptop_open", name="claude"),
+            say("открыл приложение Claude"), OK])
+        self.assertEqual(result.status, "pass", failed(result))
 
     def test_the_mouth_that_claims_without_acting_is_overruled(self):
         # Haiku says «открыл» with no tool call: the core hands the owner's words to the brain, which really does it

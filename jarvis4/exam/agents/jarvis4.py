@@ -226,6 +226,7 @@ class Jarvis4(Agent):
             world.note_tool(call.name, call.input if isinstance(call.input, dict) else {})
             return await run_tool(tool, call, itx, show)
 
+        self.core.rng.random = lambda: 1.0  # the dice of his spontaneous remarks: never, so a run is the same every time
         self.core.run_tool = noted
         stop_all = self.core.stop_all
 

@@ -7,7 +7,7 @@ from . import clock, watch
 from .store import Store
 
 HELP = ("Просто пиши или говори, как человеку. Команды без ИИ: /stop стоп всему · /reset забыть разговор (факты и уроки "
-        "остаются) · /cost траты · /status что с чем · /monitor сайты и серверы · /screen скриншот ноутбука · "
+        "остаются) · /voice голосовые ответы вкл/выкл · /cost траты · /status что с чем · /monitor сайты и серверы · /screen скриншот ноутбука · "
         "/memory факты · /lessons уроки (/unlesson 3 — забыть урок) · /watchers наблюдатели (/unwatch 3) · /groups и "
         "/group 2 тихо|говори|выкл · /calltest позвонить в Telegram · /phonetest [call] SMS или звонок на телефон")
 GROUP_MODES = {"on": "говорит", "quiet": "тихо, только когда зовут", "off": "выключен"}
@@ -42,6 +42,11 @@ class Commands:
         self.store.fresh_start("owner")
         return "забыл разговор. факты, уроки и навыки на месте"
 
+    async def cmd_voice(self, arg: str) -> str:
+        core = self.app.core
+        core.voice_replies = not core.voice_replies
+        return "на голосовые отвечаю и голосом" if core.voice_replies else "отвечаю только текстом"
+
     async def cmd_cost(self, arg: str) -> str:
         app, today = self.app, clock.day_start()
         used, rub = self.store.phone_since(today)
@@ -60,6 +65,8 @@ class Commands:
                  f"Свой Telegram: {tg}{extra}",
                  f"Gemini (глаза для видео и гифок, голос звонков): {'есть' if app.gem.ready else 'нет ключа'}",
                  f"SMS и звонки на телефон: {'настроены' if app.phone.ready else 'не настроены'}",
+                 f"Телефон (Android): {'на связи' if app.android and app.android.online else 'не подключён' if app.android else 'не настроен'}",
+                 "Другие серверы: " + (", ".join(app.ssh.names()) or "нет"),
                  f"Сегодня потрачено ${app.core.budget.spent_today():.3f} из ${app.cfg.daily_limit:.2f}"]
         if app.cfg.dry_run:
             lines.append("⚠️ РЕПЕТИЦИЯ: ничего реально не отправляю, только пишу в журнал")

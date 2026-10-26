@@ -46,6 +46,28 @@ async def shrink(data: bytes) -> bytes:
             return f.read()
 
 
+def kind_of(m) -> dict | None:
+    """The attachment of a message the way the store keeps it ({"kind": "sticker", "emoji": "😡"}); None for plain text."""
+    if m.sticker:
+        return {"kind": "sticker", "emoji": ((m.file.emoji if m.file else "") or "").replace("️", "").strip()}
+    if m.photo:
+        return {"kind": "photo"}
+    if m.gif:
+        return {"kind": "gif"}
+    if m.video_note:
+        return {"kind": "circle"}
+    if m.video:
+        return {"kind": "video"}
+    if m.voice or m.audio:
+        return {"kind": "voice"}
+    if m.document:
+        name = (m.file.name if m.file else "") or ""
+        if m.file and (m.file.mime_type or "").startswith("image/"):
+            return {"kind": "photo", "about": name or "картинка файлом"}
+        return {"kind": "file", "about": name}
+    return None
+
+
 def label(m) -> str:
     """What a message carries, in words and without downloading anything: '' for plain text."""
     if m.sticker:

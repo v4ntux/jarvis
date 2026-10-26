@@ -15,9 +15,11 @@ from .config import Config
 from .core import Core
 from .gem import Gemini
 from .learn import Review
+from .nodes.android import AndroidNode
 from .nodes.hub import Hub
 from .nodes.laptop import LaptopNode
 from .nodes.server import ServerNode, WebNode
+from .nodes.ssh import SshNodes, parse_nodes
 from .ops.monitor import Monitor
 from .ops.phone import Phone
 from .ports import Platform
@@ -67,8 +69,13 @@ class App:
         self.server = ServerNode()
         self.phone = Phone(cfg, self.store)
         self.account = Account(cfg, self.store, self.gem)
-        self.platform = Platform(tg=self.account, server=self.server, web=WebNode(), laptop=self.laptop,
-                                 extras={"phone": self.phone, "screens": {"laptop": self.laptop}})
+        nodes = parse_nodes(cfg.nodes)
+        self.ssh = SshNodes.from_config(nodes, cfg.monitor_hosts)
+        self.android = AndroidNode((nodes.get("android") or {}).get("target", "")) if nodes.get("android") else None
+        extras = {"phone": self.phone, "screens": {"laptop": self.laptop}, "ssh": self.ssh}
+        if self.android:
+            extras["android"] = extras["screens"]["android"] = self.android
+        self.platform = Platform(tg=self.account, server=self.server, web=WebNode(), laptop=self.laptop, extras=extras)
         self.core = Core(cfg, self.store, self.platform, outs=self.account.out_for)
         self.alerts = Alerts(self.core, self.account, self.phone, self.store)
         self.monitor = Monitor(cfg, self.store, self.alerts.monitor_news)
@@ -129,6 +136,8 @@ class App:
         self.spawn(self.monitor.loop())
         self.spawn(self.watchers.loop())
         self.spawn(self.review.loop())
+        if self.android:
+            self.spawn(self.android.poll_loop())
         log.info("Jarvis 4 is up: telegram %s, models %s / %s / %s, today %s",
                  "on" if ok else "OFF", cfg.mouth_model, cfg.brain_model, cfg.deep_model, clock.now().strftime("%d.%m %H:%M"))
         return ok

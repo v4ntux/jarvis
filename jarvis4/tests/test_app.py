@@ -328,6 +328,49 @@ class CallApiTest(unittest.TestCase):
             run(self.app.account.call("u77", "say", "привет"))
 
 
+class VoiceReplyTest(unittest.TestCase):
+    def setUp(self):
+        self.app = make_app()
+        self.voiced = []
+
+        async def voice(text):
+            self.voiced.append(text)
+        self.out = FakeOut()
+        self.out.voice = voice
+        self.itx = Interaction(kind="owner", chat="owner", sender="owner", text="x", msgs=[], owner=True, out=self.out,
+                               spoken=True)
+
+    def deliver(self, text):
+        run(self.app.core.deliver(self.itx, text))
+
+    def test_a_voice_message_gets_a_voice_answer_too(self):
+        self.deliver("всё готово")
+        self.assertEqual(self.out.said, ["всё готово"])
+        self.assertEqual(self.voiced, ["всё готово"])
+
+    def test_a_typed_message_does_not(self):
+        self.itx.spoken = False
+        self.deliver("всё готово")
+        self.assertEqual(self.voiced, [])
+
+    def test_the_command_switches_it_off_and_on(self):
+        self.assertIn("только текстом", run(self.app.commands.run("/voice")))
+        self.deliver("тихо")
+        self.assertEqual(self.voiced, [])
+        self.assertIn("и голосом", run(self.app.commands.run("/voice")))
+
+    def test_a_long_answer_is_not_read_out(self):
+        self.deliver("слово " * 100)
+        self.assertEqual(self.voiced, [])
+
+    def test_a_failing_voice_never_costs_the_answer(self):
+        async def broken(text):
+            raise RuntimeError("tts упал")
+        self.out.voice = broken
+        self.deliver("ответ")
+        self.assertEqual(self.out.said, ["ответ"])
+
+
 class CaptureOutTest(unittest.TestCase):
     def test_the_answer_is_kept_for_the_laptop_to_read_aloud(self):
         copy = FakeOut()
