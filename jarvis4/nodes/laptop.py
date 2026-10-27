@@ -98,6 +98,13 @@ class LaptopNode:
             raise Offline(out.get("text") or "ноутбук не отдал скриншот")
         return base64.b64decode(out["image"])
 
+    async def pull(self, path: str) -> tuple[str, bytes]:
+        """A file from the laptop (up to 20 MB): its name and bytes."""
+        out = await self._call("send_file", {"path": path}, 120)
+        if not out.get("file"):
+            raise Offline(out.get("text") or f"ноутбук не отдал {path}")
+        return out.get("name") or path.rsplit("\\", 1)[-1], base64.b64decode(out["file"])
+
     async def screen_do(self, name: str, args: dict) -> tuple[str, bytes | None]:
         out = await self._call("screen_do", {"name": name, **args}, 60)
         image = base64.b64decode(out["image"]) if out.get("image") else None

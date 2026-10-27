@@ -20,7 +20,8 @@ async def media_download(ctx: Ctx, a: dict) -> Result:
             return fail(error)
         chat, reply = person.key, ""
     try:
-        said = await grab.deliver(ctx.pf.tg, ctx.store, chat, url, ctx.itx.owner, reply, bool(a.get("audio")))
+        said = await grab.deliver(ctx.pf.tg, ctx.store, chat, url, ctx.itx.owner, reply, bool(a.get("audio")),
+                                  laptop=ctx.pf.laptop)
     except (grab.GrabError, TGError) as e:
         return fail(f"не скачалось: {e}")
     return Result(True, said, evidence=said)

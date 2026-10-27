@@ -6,3 +6,4 @@ pywin32>=306          # windows, clipboard, credentials
 pycaw>=20240210       # sound: volume and «is anything really playing»
 comtypes>=1.4         # UI Automation
 python-dotenv>=1.0    # settings
+yt-dlp>=2025.10.22    # downloads the server is shut out of (YouTube «not a bot», TikTok IP blocks)

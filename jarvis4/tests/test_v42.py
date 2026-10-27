@@ -140,7 +140,7 @@ class DeliverTest(unittest.TestCase):
     def tearDown(self):
         self.patch.stop()
 
-    async def fake_fetch(self, url, max_mb=0, audio=False):
+    async def fake_fetch(self, url, max_mb=0, audio=False, laptop=None):
         folder = os.path.join(self.tmp, "x")
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, "clip.mp4"), "wb") as f:
@@ -165,6 +165,36 @@ class DeliverTest(unittest.TestCase):
             for _ in range(grab.OTHERS_DAILY + 2):
                 asyncio.run(grab.deliver(self.tg, self.store, "owner", "https://youtu.be/x", True))
 
+    def test_a_site_that_shuts_the_server_out_is_tried_from_the_laptop(self):
+        class Laptop:
+            online = True
+
+            def __init__(self):
+                self.commands = []
+
+            async def shell(self, command, timeout=60):
+                self.commands.append(command)
+                return "C:\\Users\\van\\AppData\\Local\\Temp\\jarvis-grab\\x\\Funny_cat.mp4"
+
+            async def pull(self, path):
+                return "Funny_cat.mp4", b"0" * 1000
+
+        async def blocked(url, folder, max_mb, audio, quality=""):
+            return "", "[TikTok] 1: Your IP address is blocked from accessing this post"
+
+        laptop = Laptop()
+        with mock.patch.object(grab, "_yt_dlp", blocked):
+            folder, files, title = asyncio.run(grab.fetch("https://www.tiktok.com/@a/video/1", 50, laptop=laptop))
+            self.assertEqual([os.path.basename(f) for f in files], ["Funny_cat.mp4"])
+            self.assertEqual(title, "Funny cat")
+            self.assertIn("--max-filesize 19M", laptop.commands[0])
+            self.assertIn("Remove-Item", laptop.commands[-1])  # the laptop's copy is cleaned up
+            grab.cleanup(folder)
+            laptop.online = False
+            with self.assertRaises(grab.GrabError) as e:
+                asyncio.run(grab.fetch("https://www.tiktok.com/@a/video/1", 50, laptop=laptop))
+            self.assertIn("не на связи", str(e.exception))
+
     def test_yt_dlp_is_asked_for_a_playable_720p_or_mp3(self):
         args = grab._args("https://youtu.be/x", "/tmp/f", 50, False)
         self.assertIn("res:720,ext:mp4:m4a", args)
@@ -177,7 +207,7 @@ class AutoGrabTest(unittest.TestCase):
         core, store, tg, out = build()  # an empty script: any model call would fail the test
         got = []
 
-        async def fake_deliver(tg_, store_, chat, url, owner, reply="", audio=False):
+        async def fake_deliver(tg_, store_, chat, url, owner, reply="", audio=False, laptop=None):
             got.append((chat, url, owner, reply))
             return "Скачал"
 

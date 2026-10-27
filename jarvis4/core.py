@@ -288,7 +288,8 @@ class Core:
     async def _grab(self, inc: Incoming, url: str) -> None:
         reply = inc.ref if inc.group else ""
         try:
-            line = await grab.deliver(self.platform.tg, self.store, inc.chat, url, inc.sender == "owner", reply)
+            line = await grab.deliver(self.platform.tg, self.store, inc.chat, url, inc.sender == "owner", reply,
+                                      laptop=self.platform.laptop)
             self.store.journal_add("auto", "media_download", {"url": url, "chat": inc.chat}, True, line)
         except grab.GrabError as e:
             self.store.journal_add("auto", "media_download", {"url": url, "chat": inc.chat}, False, str(e))
