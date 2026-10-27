@@ -1,6 +1,8 @@
 """The phone and the other servers, with a pretend adb and a pretend ssh: what is sent, what is refused."""
 import asyncio
+import os
 import struct
+import tempfile
 import unittest
 
 from jarvis4.config import Config
@@ -204,6 +206,54 @@ class SshTest(unittest.TestCase):
         with self.assertRaises(KeyError) as caught:
             run(SshNodes([Server("home", "me@x", "/k", "full")]).run("nope", "ls"))
         self.assertIn("Есть: home", caught.exception.args[0])
+
+    def test_work_that_decides_by_the_exit_code_never_runs_on_a_view_only_server(self):
+        nodes = SshNodes([Server("london", "root@1.2.3.4", "/k/m", "status")])
+        with self.assertRaises(PermissionError) as caught:
+            run(nodes.exec("london", "docker stop x"))
+        self.assertIn("только смотреть", str(caught.exception))
+        with self.assertRaises(PermissionError):
+            run(nodes.fetch("london", "tar czf - /opt", os.path.join(tempfile.gettempdir(), "never")))
+
+    def test_exec_gives_the_code_and_the_text_and_sends_the_command_itself(self):
+        nodes = SshNodes([Server("home", "me@10.0.0.2", "/k/home", "full")])
+        seen = {}
+
+        async def fake(*args, **kw):
+            seen["args"] = args
+            return FakeProc(b"3 files", 7)
+
+        real = asyncio.create_subprocess_exec
+        asyncio.create_subprocess_exec = fake
+        try:
+            code, text = run(nodes.exec("home", "ls | wc -l"))
+        finally:
+            asyncio.create_subprocess_exec = real
+        self.assertEqual((code, text), (7, "3 files"))
+        self.assertEqual(seen["args"][-1], "ls | wc -l")
+        self.assertIn("BatchMode=yes", seen["args"])
+
+    def test_fetch_writes_what_the_command_prints_into_a_file_and_returns_its_errors(self):
+        nodes = SshNodes([Server("home", "me@10.0.0.2", "/k/home", "full")])
+        seen = {}
+
+        async def fake(*args, **kw):
+            seen["args"], seen["stdout"] = args, kw["stdout"]
+            kw["stdout"].write(b"archive bytes")
+            return FakeProc(b"", 0)
+
+        real = asyncio.create_subprocess_exec
+        asyncio.create_subprocess_exec = fake
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "a.tar.gz")
+            try:
+                code, err = run(nodes.fetch("home", "tar czf - -C /opt p", dest))
+            finally:
+                asyncio.create_subprocess_exec = real
+            with open(dest, "rb") as f:
+                self.assertEqual(f.read(), b"archive bytes")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(seen["args"][-1], "tar czf - -C /opt p")
 
 
 def core_with(extras):

@@ -41,18 +41,28 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
-async def run(command: str, timeout: int) -> str:
+TIMED_OUT = -1000
+
+
+async def exec(command: str, timeout: int) -> tuple[int, str]:
+    """(exit code, output) for code that decides by the code; TIMED_OUT when the command did not finish."""
     os.makedirs(WORK, exist_ok=True)
     proc = await asyncio.create_subprocess_shell(
         command, cwd=WORK, env=_env(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True)
+        stdin=asyncio.subprocess.DEVNULL, start_new_session=True)
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
     except asyncio.TimeoutError:
         _kill(proc)
+        return TIMED_OUT, ""
+    return proc.returncode or 0, out.decode(errors="replace").strip()
+
+
+async def run(command: str, timeout: int) -> str:
+    code, text = await exec(command, timeout)
+    if code == TIMED_OUT:
         return f"Ошибка: команда не уложилась в {timeout} с. Для долгого есть server_job."
-    text = out.decode(errors="replace").strip()
-    return f"(код {proc.returncode})\n{text}" if proc.returncode else text or "(пусто, код 0)"
+    return f"(код {code})\n{text}" if code else text or "(пусто, код 0)"
 
 
 async def start_job(command: str, what: str, done: Callable[[int, int, str], Awaitable[None]]) -> int:

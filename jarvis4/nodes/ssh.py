@@ -75,13 +75,56 @@ class SshNodes:
         return "\n".join(f"{s.name}: {s.target}, " + ("только смотреть состояние" if s.mode == "status" else "полный доступ")
                          for s in self.servers.values())
 
+    def _args(self, server: Server) -> list[str]:
+        return ["ssh", "-i", server.key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={KNOWN_HOSTS}", server.target]
+
+    def full(self, name: str) -> Server:
+        """A server whose commands really run. A «status» one cannot be used for work, whatever is asked of it."""
+        server = self.servers.get((name or "").strip().lower())
+        if server is None:
+            raise KeyError(f"сервера «{name}» нет. Есть: {', '.join(self.names()) or 'никаких'}")
+        if server.mode != "full":
+            raise PermissionError(f"на {server.name} у меня доступ «только смотреть состояние»: работать там я не могу")
+        return server
+
+    async def exec(self, name: str, command: str, timeout: float = 60) -> tuple[int, str]:
+        """(exit code, output) of a command that really ran, for code that decides by the code. 255: no connection."""
+        server = self.full(name)
+        try:
+            proc = await asyncio.create_subprocess_exec(*self._args(server), command, stdin=asyncio.subprocess.DEVNULL,
+                                                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        except FileNotFoundError:
+            return 255, "на этом сервере нет ssh"
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return 255, f"{server.name} не ответил за {int(timeout)} с"
+        return proc.returncode or 0, out.decode(errors="replace").strip()
+
+    async def fetch(self, name: str, command: str, dest: str, timeout: float = 1800) -> tuple[int, str]:
+        """Runs the command there and writes its stdout into a local file (an archive); (exit code, stderr)."""
+        server = self.full(name)
+        try:
+            with open(dest, "wb") as out:
+                proc = await asyncio.create_subprocess_exec(*self._args(server), command, stdin=asyncio.subprocess.DEVNULL,
+                                                            stdout=out, stderr=asyncio.subprocess.PIPE)
+                try:
+                    _, err = await asyncio.wait_for(proc.communicate(), timeout)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    return 255, f"{server.name} не успел отдать данные за {int(timeout)} с"
+        except FileNotFoundError:
+            return 255, "на этом сервере нет ssh"
+        return proc.returncode or 0, err.decode(errors="replace").strip()
+
     async def run(self, name: str, command: str, timeout: float = 60) -> tuple[str, str]:
         """(text, mode) of what the server answered."""
         server = self.servers.get((name or "").strip().lower())
         if server is None:
             raise KeyError(f"сервера «{name}» нет. Есть: {', '.join(self.names()) or 'никаких'}")
-        args = ["ssh", "-i", server.key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={KNOWN_HOSTS}", server.target]
+        args = self._args(server)
         if server.mode == "full":
             args.append(command)
         try:
