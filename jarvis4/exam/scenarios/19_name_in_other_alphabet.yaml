@@ -1,0 +1,22 @@
+id: name-other-alphabet
+title: '«Напиши Заку» — найти человека, который записан латиницей как zac'
+source: 'лог 26.10.2026 19:07 и 20:35 — tg_find «Зак» и «Zak» не нашли zac, пришлось звать по @username'
+tags: [telegram, люди]
+world:
+  people:
+    zac: {id: 1000000002, name: zac, username: zac_user}
+    kamron: {id: 5544332211, name: Камрон, username: kamron_x}
+  messages:
+    - {key: z1, chat: zac, sender: zac, text: "го вечером в доту"}
+events:
+  - {text: "напиши Заку что вечером не смогу"}
+expect:
+  effects:
+    - {kind: tg.send, to: zac}
+  confirms:
+    max: 0
+  replies:
+    - {chat: owner, max_words: 15}
+reference:
+  - - {op: send, to: zac, text: "Ван вечером не сможет"}
+    - {op: say, text: "написал заку"}

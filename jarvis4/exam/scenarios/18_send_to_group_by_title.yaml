@@ -1,0 +1,23 @@
+id: send-to-group
+title: '«Напиши в группу …» — отправить в саму группу по названию, а не искать такого человека'
+source: 'лог 26.10.2026 19:03 — tg_send(to=<название группы>) и to=<ключ группы>: «нет среди моих чатов», в группу так и не ушло'
+tags: [группы, telegram]
+world:
+  people:
+    kamron: {id: 5544332211, name: Камрон, username: kamron_x, aliases: [камрон]}
+  groups:
+    boys: {id: -1002233445566, title: Пацаны, members: [owner, kamron]}
+  messages:
+    - {key: g1, chat: boys, sender: kamron, text: "ну где вы все"}
+events:
+  - {text: "напиши в группу Пацаны что я опоздаю минут на 10"}
+expect:
+  effects:
+    - {kind: tg.send, to: boys}
+  no_effects:
+    - {kind: tg.send, to: kamron}
+  replies:
+    - {chat: owner, max_words: 15}
+reference:
+  - - {op: send, to: boys, text: "Ван опоздает минут на 10"}
+    - {op: say, text: "написал в пацаны"}
