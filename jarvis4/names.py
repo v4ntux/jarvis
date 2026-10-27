@@ -12,7 +12,8 @@ TRANSLIT = str.maketrans({"а": "a", "б": "b", "в": "v", "г": "g", "д": "d",
 
 def words(text: str) -> list[str]:
     """Latin letters, endings cut: «Сардору», «Sardor» and «сардор» all become «sardor»."""
-    latin = text.lower().translate(TRANSLIT).replace("kh", "h")
+    latin = text.lower().translate(TRANSLIT).replace("kh", "h").replace("dzh", "j").replace("zh", "j")
+    latin = re.sub(r"c(?!h)", "k", latin).replace("q", "k").replace("w", "v").replace("kk", "k")
     return [re.sub(r"(?<=\w{3})[aeiouy]+$", "", w) for w in re.findall(r"[a-z0-9]+", latin)]
 
 

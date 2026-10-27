@@ -459,6 +459,119 @@ class SlangTest(unittest.TestCase):
         self.assertEqual(store.slang("кринж")["source"], "Камрон")
 
 
+# ---- what broke live on 27.10 ------------------------------------------------------------------------------------------
+
+class StickerClient(Client):
+    def __init__(self):
+        self.sent, self.queries = [], []
+
+    async def __call__(self, request):
+        return type("Empty", (), {"stickers": []})()
+
+    async def send_file(self, entity, doc, reply_to=None):
+        self.sent.append(doc.id)
+        return type("M", (), {"id": 1})()
+
+    async def inline_query(self, bot, query):
+        self.queries.append(query)
+        return []
+
+
+class LiveFixesTest(unittest.TestCase):
+    def taste(self):
+        taste = Taste(StickerClient(), Store(":memory:"), rng=random.Random(1), gem=None)
+        taste.pool_at = time.time()
+        return taste
+
+    def test_a_rare_emoji_borrows_the_stickers_of_its_mood(self):
+        taste = self.taste()
+        taste.pool = {"👍": [Doc(7)]}
+        self.assertIsNotNone(asyncio.run(taste.express("chat", "c1", sticker="🫡", about="на связи")))
+        self.assertEqual(taste.client.sent, [7])
+
+    def test_no_sticker_becomes_a_gif_of_the_mood_and_the_reason_is_told(self):
+        taste = self.taste()
+        self.assertIsNone(asyncio.run(taste.express("chat", "c1", sticker="🫡", about="на связи")))
+        self.assertEqual(taste.client.queries, ["ok salute"])
+        self.assertIn("нет стикеров на 🫡", taste.why)
+        self.assertIn("гифок нет", taste.why)
+
+    def test_too_often_says_how_long_to_wait(self):
+        taste = self.taste()
+        taste.sent["c1"] = time.time()
+        self.assertIsNone(asyncio.run(taste.express("chat", "c1", sticker="😂")))
+        self.assertIn("слишком часто", taste.why)
+
+    def test_a_missing_favorite_names_what_there_is(self):
+        taste = self.taste()
+        self.assertIsNone(asyncio.run(taste.express("chat", "c1", gif="#12")))
+        self.assertIn("любимой гифки #12 нет", taste.why)
+
+    def test_the_tool_error_carries_the_reason(self):
+        core, store, tg, out = build()
+        tg.why = "нет стикеров на 🫡"
+
+        async def sticker(chat, emoji, reply_ref="", about=""):
+            return ""
+        tg.sticker = sticker
+        result = asyncio.run(all_tools()["tg_sticker"].run(Ctx(core, itx()), {"emoji": "🫡", "about": "привет"}))
+        self.assertIn("нет стикеров на 🫡", result.text)
+
+    def test_send_into_a_group_by_its_title(self):
+        core, store, tg, out = build()
+        it = itx("напиши в пацаны привет")
+        result = asyncio.run(core.run_tool(all_tools()["tg_send"], Call("tg_send", {"to": "Пацаны", "text": "привет"}), it))
+        self.assertTrue(result.ok, result.text)
+        self.assertEqual(tg.sent[-1][:2], ("g1", "привет"))
+
+    def test_a_laptop_file_is_pulled_over(self):
+        core, store, tg, out = build()
+
+        class Lap:
+            online = True
+
+            async def pull(self, path):
+                return "shot.png", b"PNG"
+        core.platform.laptop = Lap()
+        result = asyncio.run(all_tools()["tg_send"].run(Ctx(core, itx("скинь мне скрин")),
+                                                        {"to": "Ван", "file": "C:\\Users\\van\\Pictures\\shot.png"}))
+        self.assertTrue(result.ok, result.text)
+        self.assertEqual(tg.sent[-1][2], ["shot.png"])
+
+    def test_a_call_nobody_takes_is_tried_again(self):
+        from jarvis4.ports import CallResult
+        from jarvis4.tools import telegram
+        core, store, tg, out = build()
+        answers = [CallResult(False, "zac не взял трубку."), CallResult(True, "сказал")]
+
+        async def call(person, mode, goal):
+            return answers.pop(0)
+        tg.call = call
+        with mock.patch.object(telegram, "CALL_AGAIN", 0):
+            result = asyncio.run(all_tools()["tg_call"].run(Ctx(core, itx("разбуди камрона")),
+                                                            {"to": "Камрон", "goal": "подъём", "tries": 3}))
+        self.assertTrue(result.ok)
+        self.assertIn("2 раз", result.text)
+
+    def test_zak_is_zac(self):
+        from jarvis4 import names
+        self.assertTrue(names.matches("Зак", ["zac", "sd_zuc"]))
+        self.assertFalse(names.matches("Сар", ["Sardor"]))
+
+    def test_days_in_russian(self):
+        from jarvis4 import watch
+        self.assertEqual(watch._days("ежедневно"), set(range(7)))
+        self.assertEqual(watch._days("пн, ср"), {0, 2})
+
+    def test_a_rule_from_the_owner_is_a_lesson(self):
+        core, store, tg, out = build()
+        it = itx("запомни: родители мне не должны, не додумывай кто кому должен")
+        result = asyncio.run(all_tools()["learn_lesson"].run(Ctx(core, it), {"text": "Не додумывать, кто кому должен."}))
+        self.assertTrue(result.ok, result.text)
+        plain = asyncio.run(all_tools()["learn_lesson"].run(Ctx(core, itx("открой музыку")), {"text": "что-то длинное"}))
+        self.assertFalse(plain.ok)
+
+
 # ---- the account's Telegram calls, Telethon-shaped -------------------------------------------------------------------
 
 class TLClient:

@@ -111,6 +111,8 @@ TASK = re.compile(
     r"dobav|peresh|zalej|soberi|zagruz|sohran|zaydi|najm|skopir|vstav|skin)\w*", re.I)
 QUESTION = re.compile(r"^\W*(?:а\s+)?(?:это\s+)?(?:когда|зачем|почему|что|чё|че|как|где|кто|сколько|какой|какая|какие)(?!\w)",
                       re.I)
+RULE = re.compile(r"запомни|всегда|никогда|впредь|в следующий раз|не надо|не нужно|не делай|не додумывай|не угадывай|"
+                  r"не спрашивай|не переспрашивай|не отказывайся|не пиши|делай так|zapomni|vsegda|nikogda", re.I)
 THINK = re.compile(r"подумай|хорошенько|умн(ее|ую)|podumay|horoshenko", re.I)
 
 

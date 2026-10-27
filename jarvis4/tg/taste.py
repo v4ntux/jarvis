@@ -26,6 +26,12 @@ CHOICES = 5
 LOOK_AT = 6  # candidates Gemini sees before one is picked
 FRAME_MAX = 1024 * 1024
 GIF_BOT = "gif"
+# Emoji of one mood, and a GIF search for it: an emoji with no stickers borrows its neighbours' stickers, and when no
+# sticker fits at all, a GIF of the mood goes instead
+MOODS = (("🫡👍👌✅🤝💪😎🙂☺👋🆗", "ok salute"), ("😂🤣😆😹😄😁😅", "laughing hard"), ("😢😭🥺😿😞😔", "crying sad"),
+         ("😡🤬😤👿💢", "angry"), ("😱😨😳🤯😮😲", "shocked"), ("❤😍🥰😘💕🫶", "love"), ("🤔🧐🤨", "thinking hmm"),
+         ("🥳🎉🔥💯🤩", "party celebrate"), ("😴🥱💤", "sleepy"), ("🤡💀☠🗿😐😑🙄🤦", "cringe facepalm"),
+         ("👀🍿", "popcorn watching"), ("🤷", "shrug idk"))
 BLOCKED = re.compile(r"porn|sex|nude|naked|nsfw|xxx|hentai|gore|секс|порно|голый|голая|обнаж|18\+", re.I)
 
 
@@ -39,6 +45,7 @@ class Taste:
         self.sent: dict[int, float] = {}
         self.hourly: list[float] = []
         self.frames: dict[int, tuple[str, bytes]] = {}  # document id → a frame Gemini can look at
+        self.why = ""  # why the last express() sent nothing, in words for the model and the owner
 
     def may(self, chat: int) -> bool:
         now = time.time()
@@ -47,15 +54,29 @@ class Taste:
 
     async def express(self, entity, chat_id: int, sticker: str = "", gif: str = "", reply_to: int | None = None,
                       about: str = ""):
-        """Sends one sticker or GIF (the sticker wins when both are asked) that fits «about»; the sent message, or None."""
-        if not (sticker or gif) or not self.may(chat_id):
+        """Sends one sticker or GIF (the sticker wins when both are asked) that fits «about»; the sent message, or None
+        with the reason in self.why. A sticker that does not work out becomes a GIF of the same mood."""
+        self.why = ""
+        if not (sticker or gif):
+            self.why = "не сказано, что слать"
+            return None
+        if not self.may(chat_id):
+            wait = max(0, int(GAP - (time.time() - self.sent.get(chat_id, 0))))
+            self.why = f"слишком часто: в этом чате можно через {wait} с" if wait else f"лимит {HOURLY} в час исчерпан"
             return None
         try:
             sent = await self._sticker(entity, sticker, reply_to, about) if sticker else None
-            sent = sent or (await self._gif(entity, gif, reply_to, about) if gif else None)
+            if not sent and (gif or sticker):
+                missed = self.why
+                sent = await self._gif(entity, gif or mood_query(sticker), reply_to, about)
+                if not sent and missed:
+                    self.why = f"{missed}; гифка тоже: {self.why}"
         except Exception as e:  # Telegram refuses things now and then; a missing sticker is not worth an error
             log.warning("sticker or GIF failed: %s: %s", type(e).__name__, e)
+            self.why = f"Telegram отказал: {type(e).__name__}: {str(e)[:120]}"
             return None
+        if not sent:
+            log.info("nothing sent (%s / %s / %s): %s", sticker, gif, about, self.why)
         if sent:
             self.sent[chat_id] = time.time()
             self.hourly.append(time.time())
@@ -167,7 +188,7 @@ class Taste:
             log.info("fit check skipped: %s", e)
             return self.rng.randrange(min(firsts, len(docs)))
         if not order:
-            log.info("nothing fits «%s» among %d", about, len(shown))
+            self.why = f"посмотрел {len(shown)} шт., ни одна не подошла к «{about}»"
             return None
         return shown[self.rng.choice(order[:2])]  # the best two, so the same moment does not always get the same one
 
@@ -175,10 +196,15 @@ class Taste:
         from telethon.tl.functions.messages import GetStickersRequest
 
         key = emoji.replace("️", "")
-        options = list((await self._pool()).get(key) or []) + self.friends.get(key, [])
+        pool = await self._pool()
+        options = list(pool.get(key) or []) + self.friends.get(key, [])
+        if len(options) < 3:  # a rare emoji borrows the stickers of its mood
+            for near in related(key):
+                options += list(pool.get(near) or []) + self.friends.get(near, [])
         if not options:
             options = list(getattr(await self.client(GetStickersRequest(emoticon=emoji, hash=0)), "stickers", []))
         if not options:
+            self.why = f"нет стикеров на {emoji}"
             return None
         sample = self.rng.sample(options, min(LOOK_AT, len(options)))
         i = await self._pick(sample, about, len(sample))
@@ -186,11 +212,18 @@ class Taste:
 
     async def _gif(self, entity, what: str, reply_to: int | None, about: str = ""):
         if what.startswith("#"):
-            return await self._favorite(entity, what[1:], reply_to)
+            sent = await self._favorite(entity, what[1:], reply_to)
+            if sent or not about:
+                return sent
+            what = about  # no such favorite: search for what he meant instead
         if BLOCKED.search(what):
+            self.why = "такое не ищу"
             return None
         results = [r for r in list(await self.client.inline_query(GIF_BOT, what) or [])[:LOOK_AT + 2]
                    if getattr(r, "document", None) is not None][:LOOK_AT]
+        if not results:
+            self.why = f"по запросу «{what}» гифок нет"
+            return None
         i = await self._pick([r.document for r in results], about or what, CHOICES)
         return None if i is None else await results[i].click(entity, reply_to=reply_to)
 
@@ -199,9 +232,26 @@ class Taste:
 
         doc_id = self.store.fave_doc(int(number)) if number.isdigit() else None
         if doc_id is None:
+            have = self.store.faves("gif")
+            self.why = f"любимой гифки #{number} нет (" + (
+                "есть: " + ", ".join(f"#{i} {d[:30]}" for i, d in have[:10]) if have else "любимых пока нет") + ")"
             return None
         gifs = getattr(await self.client(GetSavedGifsRequest(0)), "gifs", [])
         doc = next((g for g in gifs if g.id == doc_id), None)
         if doc is None:
             return None
         return await self.client.send_file(entity, doc, reply_to=reply_to)
+
+
+def related(emoji: str) -> list[str]:
+    """Other emoji of the same mood."""
+    for group, _ in MOODS:
+        if emoji and emoji in group:
+            return [e for e in group if e != emoji]
+    return []
+
+
+def mood_query(emoji: str) -> str:
+    """A GIF search for the mood of an emoji ('' when it has none)."""
+    key = (emoji or "").replace("️", "")
+    return next((query for group, query in MOODS if key and key in group), "")

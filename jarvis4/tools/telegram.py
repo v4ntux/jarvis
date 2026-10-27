@@ -7,6 +7,7 @@ and delivers. Nothing here shells out: the Telegram session is never touched by 
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 
@@ -19,6 +20,7 @@ from .base import B, I, S, Ctx, Risk, Tool, owner_person
 OWNER_WORDS = {"owner", "ван", "van", "me", "я", "мне", "батя", "хозяин"}
 MASS = re.compile(r"(?<!\w)(всем|всех|каждому|каждого|все,? кто|all|everyone)(?!\w)", re.I)
 FILE_ROOTS = ("/opt/jarvis/data/inbox", "/opt/jarvis/data/work")
+CALL_AGAIN = 120  # seconds between tries of a call nobody took
 
 
 async def resolve(ctx: Ctx, query: str) -> tuple[Person | None, str]:
@@ -66,6 +68,22 @@ async def _reach_guard(ctx: Ctx, args: dict, verb: str) -> guard.Verdict | None:
     if not authorized(ctx, person):
         return guard.ask(f"{verb.capitalize()} {person.label}? Этого человека ты не называл.", f"reach:{person.key}")
     return None
+
+
+WINDOWS_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+async def any_file(ctx: Ctx, name: str) -> tuple[str, bytes] | str:
+    """A file to send: Jarvis's own (inbox, work), or one on the laptop (C:\\...) pulled over when it is online."""
+    if WINDOWS_PATH.match(name or ""):
+        lap = ctx.pf.laptop
+        if lap is None or not lap.online:
+            return "Ошибка: файл на ноутбуке, а ноутбук не на связи."
+        try:
+            return await lap.pull(name)
+        except Exception as e:
+            return f"Ошибка: ноутбук не отдал {name}: {e}"
+    return _file(name)
 
 
 def _file(name: str) -> tuple[str, bytes] | str:
@@ -142,11 +160,15 @@ async def tg_chats(ctx: Ctx, a: dict) -> Result:
 async def tg_send(ctx: Ctx, a: dict) -> Result:
     person, error = await resolve(ctx, a.get("to", ""))
     if person is None:
-        return fail(error)
+        from .tgadmin import find_chat
+        room = find_chat(ctx, a.get("to", ""))
+        if isinstance(room, str):
+            return fail(error)
+        return await _send_room(ctx, room, a)  # a group or channel he is in
     text = str(a.get("text") or "").strip()
     files = []
     if a.get("file"):
-        got = _file(str(a["file"]))
+        got = await any_file(ctx, str(a["file"]))
         if isinstance(got, str):
             return fail(got)
         files.append(got)
@@ -161,6 +183,25 @@ async def tg_send(ctx: Ctx, a: dict) -> Result:
     if person.key != "owner":
         ctx.store.upsert_person(person.key, dialog=True)
     return Result(True, f"Отправил {person.label}.", evidence=f"сообщение {ref}")
+
+
+async def _send_room(ctx: Ctx, room: tuple[str, str, str], a: dict) -> Result:
+    key, kind, title = room
+    text = str(a.get("text") or "").strip()
+    files = []
+    if a.get("file"):
+        got = await any_file(ctx, str(a["file"]))
+        if isinstance(got, str):
+            return fail(got)
+        files.append(got)
+    if not text and not files:
+        return fail("нечего отправлять: ни текста, ни файла.")
+    try:
+        ref = await ctx.pf.tg.send(key, text, files)
+    except TGError as e:
+        return fail(str(e))
+    ctx.store.add_msg(ref, key, "jarvis", text, {"kind": "file", "about": files[0][0]} if files else None, task=ctx.itx.id)
+    return Result(True, f"Отправил в {'канал' if kind == 'channel' else 'группу'} «{title}».", evidence=f"сообщение {ref}")
 
 
 async def tg_forward(ctx: Ctx, a: dict) -> Result:
@@ -194,11 +235,17 @@ async def tg_call(ctx: Ctx, a: dict) -> Result:
     goal = str(a.get("goal") or "").strip()
     if not goal:
         return fail("не сказано, о чём говорить (goal).")
-    try:
-        res = await ctx.pf.tg.call(person.key, mode, goal)
-    except TGError as e:
-        return fail(str(e))
-    return Result(res.answered, res.text if res.answered else res.text, evidence=("дозвонился" if res.answered else "не дозвонился"))
+    tries = max(1, min(int(a.get("tries") or 1), 3))
+    for attempt in range(1, tries + 1):
+        try:
+            res = await ctx.pf.tg.call(person.key, mode, goal)
+        except TGError as e:
+            return fail(str(e))
+        if res.answered or attempt == tries:
+            break
+        await asyncio.sleep(CALL_AGAIN)
+    tail = f" (звонил {attempt} раз)" if attempt > 1 else ""
+    return Result(res.answered, res.text + tail, evidence=("дозвонился" if res.answered else "не дозвонился") + tail)
 
 
 async def tg_react(ctx: Ctx, a: dict) -> Result:
@@ -217,8 +264,9 @@ async def _where(ctx: Ctx, to: str) -> tuple[str, str]:
     return (person.key if person else ctx.itx.chat), ""
 
 
-NOT_SENT = ("Ошибка: не отправил — ни одна не подошла к моменту (или слишком часто). Не пробуй ещё раз: ответь словами "
-            "или реакцией.")
+def not_sent(ctx: Ctx) -> Result:
+    why = getattr(ctx.pf.tg, "why", "") or "причина неизвестна"
+    return fail(f"не отправил: {why}. Не пробуй снова: ответь словами или реакцией.")
 
 
 async def tg_sticker(ctx: Ctx, a: dict) -> Result:
@@ -229,7 +277,7 @@ async def tg_sticker(ctx: Ctx, a: dict) -> Result:
     if ref:
         ctx.store.add_msg(ref, chat, "jarvis", "", {"kind": "sticker", "emoji": emoji, "about": about}, reply_ref=reply,
                           task=ctx.itx.id)
-    return Result(True, "Отправил стикер.") if ref else fail(NOT_SENT)
+    return Result(True, "Отправил стикер (или гифку того же настроения).") if ref else not_sent(ctx)
 
 
 async def tg_gif(ctx: Ctx, a: dict) -> Result:
@@ -240,7 +288,7 @@ async def tg_gif(ctx: Ctx, a: dict) -> Result:
     if ref:
         ctx.store.add_msg(ref, chat, "jarvis", "", {"kind": "gif", "about": about or query}, reply_ref=reply,
                           task=ctx.itx.id)
-    return Result(True, "Отправил гифку.") if ref else fail(NOT_SENT)
+    return Result(True, "Отправил гифку.") if ref else not_sent(ctx)
 
 
 async def tg_leave(ctx: Ctx, a: dict) -> Result:
@@ -288,7 +336,8 @@ def tools() -> list[Tool]:
              label=lambda a, r: f"читаю чат {a.get('chat', '')}"),
         Tool("tg_chats", "С кем у меня есть переписка и что было последним. Для «напиши всем, с кем я общаюсь».",
              {"limit": I}, [], tg_chats, light=True),
-        Tool("tg_send", "Написать человеку от своего аккаунта: текст и/или файл из inbox/work. Только тем, кого Ван "
+        Tool("tg_send", "Написать человеку или в группу/канал, где я есть (to — имя, @username или название группы), "
+             "от своего аккаунта: текст и/или файл (из inbox/work или с ноутбука C:\\...). Только тем, кого Ван "
              "назвал (или «всем» знакомым). Звонить вместо этого нельзя: звонок — это tg_call.",
              {"to": S, "text": S, "file": S}, ["to"], tg_send, risk=Risk.OUT, light=True, guard=_guard_send,
              label=lambda a, r: f"пишу {a.get('to', '')}"),
@@ -297,9 +346,10 @@ def tools() -> list[Tool]:
              {"refs": {"type": "array", "items": S}, "to": S}, ["refs"], tg_forward, risk=Risk.OUT, light=True,
              guard=_guard_forward, label=lambda a, r: "пересылаю"),
         Tool("tg_call", "Позвонить человеку в Telegram. mode=say — сказать goal и положить трубку; mode=talk — "
-             "живой разговор на тему goal (привет, пообщаться). Звонок не заменяется сообщением. Не взял трубку — "
-             "так и скажи Вану, ему не пиши.",
-             {"to": S, "mode": {"type": "string", "enum": ["say", "talk"]}, "goal": S}, ["to", "goal"], tg_call,
+             "живой разговор на тему goal (привет, пообщаться). tries — сколько раз звонить, если не берёт (до 3, "
+             "через 2 минуты; разбудить — 3). Звонок не заменяется сообщением. Не взял трубку — так и скажи Вану, "
+             "ему не пиши.",
+             {"to": S, "mode": {"type": "string", "enum": ["say", "talk"]}, "goal": S, "tries": I}, ["to", "goal"], tg_call,
              risk=Risk.OUT, light=True, guard=_guard_call, label=lambda a, r: f"звоню {a.get('to', '')}"),
         Tool("tg_react", "Поставить эмодзи-реакцию под сообщением (по умолчанию под последним).",
              {"emoji": S, "ref": S}, ["emoji"], tg_react, terminal=True, light=True, others=True),
@@ -307,8 +357,8 @@ def tools() -> list[Tool]:
              "момент (3–8 слов): я сначала посмотрю на стикеры и отправлю только подходящий.",
              {"emoji": S, "about": S, "to": S}, ["emoji", "about"], tg_sticker, terminal=True, light=True, others=True),
         Tool("tg_gif", "Отправить гифку по поисковому запросу из 2–4 слов по-английски (в текущий чат или to). about — "
-             "что хочешь выразить (3–8 слов по-русски): гифки сначала проверяются на уместность. «#12» — одна из "
-             "любимых гифок.", {"query": S, "about": S, "to": S}, ["query", "about"], tg_gif, terminal=True,
+             "что хочешь выразить (3–8 слов по-русски): гифки сначала проверяются на уместность. «#N» — любимая "
+             "гифка с номером N (только если номер знаешь).", {"query": S, "about": S, "to": S}, ["query", "about"], tg_gif, terminal=True,
              light=True, others=True),
         Tool("tg_leave", "Выйти из группы или канала (по умолчанию из текущей группы). Только по просьбе Вана.",
              {"chat": S}, [], tg_leave, risk=Risk.OWN, light=True),

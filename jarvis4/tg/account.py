@@ -567,6 +567,11 @@ class Account(Manage):
         except (RPCError, TGError):
             pass  # Telegram refuses emoji it does not offer: a missing like is not an error
 
+    @property
+    def why(self) -> str:
+        """Why the last sticker or GIF did not go out."""
+        return self.taste.why if self.taste else "стикеры ещё не готовы"
+
     async def sticker(self, chat: str, emoji: str, reply_ref: str = "", about: str = "") -> str:
         if fake := self.dry("sticker", f"{chat} {emoji} ({about})"):
             return fake

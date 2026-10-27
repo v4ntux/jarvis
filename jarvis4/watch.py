@@ -23,7 +23,11 @@ log = logging.getLogger("jarvis4.watch")
 SOURCES = ("time", "laptop", "server", "url", "laptop_offline", "laptop_online")
 CONDITIONS = ("changed", "contains", "missing", "below", "above", "equals")
 DAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
-DAY_SETS = {"daily": set(range(7)), "weekdays": set(range(5)), "weekends": {5, 6}}
+DAY_SETS = {"daily": set(range(7)), "weekdays": set(range(5)), "weekends": {5, 6}, "ежедневно": set(range(7)),
+            "каждый день": set(range(7)), "всегда": set(range(7)), "будни": set(range(5)), "по будням": set(range(5)),
+            "выходные": {5, 6}, "по выходным": {5, 6}}
+RU_DAYS = {"пн": "mon", "по": "mon", "вт": "tue", "ср": "wed", "чт": "thu", "че": "thu", "пт": "fri", "пя": "fri",
+           "сб": "sat", "су": "sat", "вс": "sun", "во": "sun"}
 TICK = 15
 CHECK_TIMEOUT = 30
 NUMBER = re.compile(r"-?\d+(?:[.,]\d+)?")
@@ -33,7 +37,8 @@ def _days(text: str) -> set[int]:
     text = (text or "daily").strip().lower()
     if text in DAY_SETS:
         return DAY_SETS[text]
-    days = {DAYS[d.strip()[:3]] for d in text.split(",") if d.strip()[:3] in DAYS}
+    words = [d.strip() for d in re.split(r"[,\s]+", text) if d.strip()]
+    days = {DAYS[d[:3]] for d in words if d[:3] in DAYS} | {DAYS[RU_DAYS[d[:2]]] for d in words if d[:2] in RU_DAYS}
     if not days:
         raise ValueError(f"не понял дни «{text}»: нужно daily, weekdays, weekends или mon,tue,...")
     return days

@@ -23,7 +23,8 @@ async def forget(ctx: Ctx, a: dict) -> Result:
 async def learn_lesson(ctx: Ctx, a: dict) -> Result:
     """The owner corrected Jarvis: the rule becomes part of the prompt whenever a similar thing comes up."""
     text = str(a.get("text", "")).strip()
-    if not persona.is_correction(ctx.itx.text) and not ctx.itx.note:
+    said = [m.text for m in ctx.store.recent("owner", 6) if m.sender == "owner" and m.text] + [ctx.itx.text]
+    if not any(persona.is_correction(t) or persona.RULE.search(t) for t in said) and not ctx.itx.note:
         return fail("урок записывают, только когда Ван поправил или недоволен. Сейчас его просьба обычная: просто сделай.")
     if len(text) < 8:
         return fail("урок слишком короткий: напиши, что делать и чего не делать.")
