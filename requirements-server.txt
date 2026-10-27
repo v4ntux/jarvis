@@ -11,4 +11,5 @@ ddgs>=9.0             # free web search
 trafilatura>=2.0      # page text for read_url
 faster-whisper>=1.1   # voice messages when Gemini cannot hear them
 edge-tts>=7.0         # voice replies
+yt-dlp>=2025.10.22    # videos and pictures from TikTok, Instagram, Pinterest, YouTube for anybody who asks
 pyyaml>=6.0           # the exam's scenarios

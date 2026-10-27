@@ -1,4 +1,5 @@
-"""Jarvis's own Telegram account as tools: find people, read chats, forward, write, call, react, leave.
+"""Jarvis's own Telegram account as tools: find people, read chats, forward, write, call, react, stickers, leave.
+Joining, blocking, channels and running groups are in tgadmin.py.
 
 The model names messages by ref and people by name; the guard decides whom Jarvis may reach on his own (anyone
 the owner named, or everybody he already talks with when the owner asked for all of them) and the platform paces
@@ -130,7 +131,12 @@ async def tg_chats(ctx: Ctx, a: dict) -> Result:
         last = ctx.store.recent(p.key, 1)
         tail = f"; последнее: {last[0].text[:60]}" if last and last[0].text else ""
         lines.append(f"{p.label}{' — ЗАБЛОКИРОВАЛ меня' if p.blocked else ''}{tail}")
-    return Result(True, "\n".join(lines[: int(a.get("limit") or 30)]) or "Мне пока никто не писал.")
+    lines = lines[: int(a.get("limit") or 30)]
+    rooms = [f"{'канал' if kind == 'channel' else 'группа'} «{title}»{' (выкл)' if mode == 'off' else ''}"
+             for _, kind, title, mode in ctx.store.chats() if kind in ("group", "channel")]
+    if rooms:
+        lines.append("Группы и каналы: " + "; ".join(rooms))
+    return Result(True, "\n".join(lines) or "Мне пока никто не писал.")
 
 
 async def tg_send(ctx: Ctx, a: dict) -> Result:
@@ -211,34 +217,44 @@ async def _where(ctx: Ctx, to: str) -> tuple[str, str]:
     return (person.key if person else ctx.itx.chat), ""
 
 
+NOT_SENT = ("Ошибка: не отправил — ни одна не подошла к моменту (или слишком часто). Не пробуй ещё раз: ответь словами "
+            "или реакцией.")
+
+
 async def tg_sticker(ctx: Ctx, a: dict) -> Result:
     chat, reply = await _where(ctx, str(a.get("to") or ""))
     emoji = str(a.get("emoji") or "😄")
-    ref = await ctx.pf.tg.sticker(chat, emoji, reply)
+    about = str(a.get("about") or "")
+    ref = await ctx.pf.tg.sticker(chat, emoji, reply, about=about)
     if ref:
-        ctx.store.add_msg(ref, chat, "jarvis", "", {"kind": "sticker", "emoji": emoji}, reply_ref=reply, task=ctx.itx.id)
-    return Result(bool(ref), "Отправил стикер." if ref else "Ошибка: подходящего стикера не нашлось.")
+        ctx.store.add_msg(ref, chat, "jarvis", "", {"kind": "sticker", "emoji": emoji, "about": about}, reply_ref=reply,
+                          task=ctx.itx.id)
+    return Result(True, "Отправил стикер.") if ref else fail(NOT_SENT)
 
 
 async def tg_gif(ctx: Ctx, a: dict) -> Result:
     chat, reply = await _where(ctx, str(a.get("to") or ""))
     query = str(a.get("query") or "")
-    ref = await ctx.pf.tg.gif(chat, query, reply)
+    about = str(a.get("about") or "")
+    ref = await ctx.pf.tg.gif(chat, query, reply, about=about)
     if ref:
-        ctx.store.add_msg(ref, chat, "jarvis", "", {"kind": "gif", "about": query}, reply_ref=reply, task=ctx.itx.id)
-    return Result(bool(ref), "Отправил гифку." if ref else "Ошибка: гифка не нашлась.")
+        ctx.store.add_msg(ref, chat, "jarvis", "", {"kind": "gif", "about": about or query}, reply_ref=reply,
+                          task=ctx.itx.id)
+    return Result(True, "Отправил гифку.") if ref else fail(NOT_SENT)
 
 
 async def tg_leave(ctx: Ctx, a: dict) -> Result:
     chat = str(a.get("chat") or ctx.itx.chat)
-    group = next((c for c in ctx.store.chats("group") if chat in (c[0], c[2]) or names.matches(chat, [c[2]])), None)
+    rooms = [c for c in ctx.store.chats() if c[1] in ("group", "channel")]
+    group = next((c for c in rooms if chat in (c[0], c[2]) or names.matches(chat, [c[2]])), None)
     if group is None:
-        return fail(f"«{chat}» не группа, из которой можно выйти.")
+        return fail(f"«{chat}» не группа и не канал, из которых можно выйти.")
     try:
         await ctx.pf.tg.leave(group[0])
     except TGError as e:
         return fail(str(e))
-    return Result(True, f"Вышел из группы «{group[2]}».", evidence="вышел")
+    ctx.store.set_chat_mode(group[0], "off")
+    return Result(True, f"Вышел из {'канала' if group[1] == 'channel' else 'группы'} «{group[2]}».", evidence="вышел")
 
 
 async def pass_to_owner(ctx: Ctx, a: dict) -> Result:
@@ -287,13 +303,15 @@ def tools() -> list[Tool]:
              risk=Risk.OUT, light=True, guard=_guard_call, label=lambda a, r: f"звоню {a.get('to', '')}"),
         Tool("tg_react", "Поставить эмодзи-реакцию под сообщением (по умолчанию под последним).",
              {"emoji": S, "ref": S}, ["emoji"], tg_react, terminal=True, light=True, others=True),
-        Tool("tg_sticker", "Отправить стикер по эмодзи (в текущий чат или to). Редко и только в тему.",
-             {"emoji": S, "to": S}, ["emoji"], tg_sticker, terminal=True, light=True, others=True),
-        Tool("tg_gif", "Отправить гифку по поисковому запросу из 2–4 слов по-английски (в текущий чат или to). "
-             "«#12» — одна из любимых гифок.", {"query": S, "to": S}, ["query"], tg_gif, terminal=True, light=True,
-             others=True),
-        Tool("tg_leave", "Выйти из группы (по умолчанию из текущей). Только по просьбе Вана.", {"chat": S}, [], tg_leave,
-             risk=Risk.OWN, light=True),
+        Tool("tg_sticker", "Отправить стикер по эмодзи (в текущий чат или to). about — что хочешь выразить в этот "
+             "момент (3–8 слов): я сначала посмотрю на стикеры и отправлю только подходящий.",
+             {"emoji": S, "about": S, "to": S}, ["emoji", "about"], tg_sticker, terminal=True, light=True, others=True),
+        Tool("tg_gif", "Отправить гифку по поисковому запросу из 2–4 слов по-английски (в текущий чат или to). about — "
+             "что хочешь выразить (3–8 слов по-русски): гифки сначала проверяются на уместность. «#12» — одна из "
+             "любимых гифок.", {"query": S, "about": S, "to": S}, ["query", "about"], tg_gif, terminal=True,
+             light=True, others=True),
+        Tool("tg_leave", "Выйти из группы или канала (по умолчанию из текущей группы). Только по просьбе Вана.",
+             {"chat": S}, [], tg_leave, risk=Risk.OWN, light=True),
         Tool("pass_to_owner", "Передать Вану короткую записку: кто пишет и что просит. Для чужих людей.",
              {"note": S}, ["note"], pass_to_owner, others=True, light=True),
     ]

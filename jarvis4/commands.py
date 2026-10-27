@@ -8,7 +8,7 @@ from .store import Store
 
 HELP = ("Просто пиши или говори, как человеку. Команды без ИИ: /stop стоп всему · /reset забыть разговор (факты и уроки "
         "остаются) · /limit сбросить или поднять лимит на сегодня · /voice голосовые ответы вкл/выкл · /cost траты · /status что с чем · /monitor сайты и серверы · /screen скриншот ноутбука · "
-        "/memory факты · /lessons уроки (/unlesson 3 — забыть урок) · /watchers наблюдатели (/unwatch 3) · /groups и "
+        "/memory факты · /lessons уроки (/unlesson 3 — забыть урок) · /slang мой словарь (/unslang слово) · /ignored кого игнорю · /watchers наблюдатели (/unwatch 3) · /groups и "
         "/group 2 тихо|говори|выкл · /calltest позвонить в Telegram · /phonetest [call] SMS или звонок на телефон")
 GROUP_MODES = {"on": "говорит", "quiet": "тихо, только когда зовут", "off": "выключен"}
 MODE_WORDS = {"on": "on", "вкл": "on", "говори": "on", "включи": "on", "quiet": "quiet", "тихо": "quiet",
@@ -119,6 +119,31 @@ class Commands:
         if not number.isdigit():
             return "напиши номер: /unlesson 3"
         return f"забыл урок #{number}" if self.store.drop_lesson(int(number)) else f"урока #{number} нет"
+
+    async def cmd_slang(self, arg: str) -> str:
+        """/slang — his dictionary; /slang слово — one word."""
+        if arg:
+            row = self.store.slang(arg)
+            if not row or row["status"] != "known":
+                return f"«{arg}» не знаю" + (", жду, когда объяснят" if row and row["status"] in ("ask", "asked") else "")
+            example = f"\nкак говорят: {row['example']}" if row["example"] else ""
+            return f"{row['word']} — {row['meaning']}{example}\nвыучил от: {row['source'] or '?'}, сказал сам {row['uses']} раз"
+        rows = self.store.slang_words()
+        if not rows:
+            return "словарь пока пустой: слова появляются, когда люди объясняют или после ночного разбора"
+        return f"мой словарь ({len(rows)}):\n" + "\n".join(f"{w} — {m}" for w, m, *_ in rows[:60]) + \
+            "\n\nзабыть слово: /unslang слово"
+
+    async def cmd_unslang(self, arg: str) -> str:
+        if not arg:
+            return "напиши слово: /unslang кринж"
+        return f"забыл «{arg}»" if self.store.slang_forget(arg) else f"«{arg}» и так не знаю"
+
+    async def cmd_ignored(self, arg: str) -> str:
+        keys = sorted(self.store.ignored())
+        if not keys:
+            return "никого не игнорю"
+        return "игнорю: " + ", ".join(self.app.core.name_of(k) for k in keys) + "\nперестать: скажи «не игнорь <имя>»"
 
     async def cmd_watchers(self, arg: str) -> str:
         rows = self.store.watchers()

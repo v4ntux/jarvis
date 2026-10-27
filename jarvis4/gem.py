@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import time
 
 import httpx
@@ -19,6 +20,10 @@ RETRY_STATUS = {429, 500, 502, 503, 504}
 TRANSCRIBE = "Запиши дословно, что сказано. Только сам текст, без пояснений и кавычек. Если речи нет, ответь пустой строкой."
 DESCRIBE = ("Опиши коротко (до 25 слов) по-русски, что на картинке или в ролике: сюжет, текст, эмоция, мем. Если это "
             "известный мем, назови его. Без вступлений.")
+FIT = ("Выше {n} картинок по порядку (кадры стикеров или гифок, номер перед каждой). Момент в переписке: «{about}». "
+       "Какие подходят к этому моменту по смыслу и настроению, так что человек в чате улыбнётся, а не удивится? "
+       "Неуместные, оскорбительные и просто случайные не бери. Ответь только номерами через запятую, лучший первым; "
+       "если ни одна не подходит, ответь 0.")
 SAFETY = [{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"}]
 
 
@@ -87,3 +92,18 @@ class Gemini:
         """What a sticker, GIF or video shows, in a few words."""
         return await self.generate("Ты описываешь картинки и видео для друга, который их не видит.",
                                    [{"role": "user", "parts": [*parts, {"text": DESCRIBE}]}], max_tokens=300)
+
+    async def fitting(self, frames: list[tuple[str, bytes]], about: str) -> list[int]:
+        """Which pictures (mime, bytes) fit the moment, best first, as 0-based positions; [] when none does."""
+        parts: list[dict] = []
+        for n, (mime, data) in enumerate(frames, 1):
+            parts += [{"text": f"#{n}"}, {"inlineData": {"mimeType": mime, "data": base64.b64encode(data).decode()}}]
+        text = await self.generate("Ты со вкусом подбираешь стикеры и гифки к переписке друзей.",
+                                   [{"role": "user", "parts": [*parts, {"text": FIT.format(n=len(frames), about=about)}]}],
+                                   max_tokens=60)
+        picked = []
+        for number in re.findall(r"\d+", text):
+            i = int(number) - 1
+            if 0 <= i < len(frames) and i not in picked:
+                picked.append(i)
+        return picked

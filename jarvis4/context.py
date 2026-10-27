@@ -103,6 +103,12 @@ def pick_lessons(store: Store, text: str) -> list[tuple[int, str]]:
     return [(lid, lesson) for _, lid, lesson in scored[:MAX_LESSONS]]
 
 
+def media_lately(store: Store, chat: str, last: int = 3) -> bool:
+    """Was there a sticker or GIF among Jarvis's last few messages in the chat (or has he said too little to tell)?"""
+    mine = [m for m in store.recent(chat, 30) if m.sender == "jarvis"][-last:]
+    return len(mine) < last or any((m.media or {}).get("kind") in ("sticker", "gif") for m in mine)
+
+
 def system(core, itx: Interaction, role: str, goal: str = "") -> list[dict]:
     """Two blocks: the steady part (cached between calls) and the live part (time, laptop, money, recent actions)."""
     st, cfg = core.store, core.cfg
@@ -147,6 +153,11 @@ def system(core, itx: Interaction, role: str, goal: str = "") -> list[dict]:
         if recent:
             live.append("Твои последние действия (для вопросов «что ты делал», точные тексты через инструмент journal):\n"
                         + recent)
+    words = learn.dictionary(st, itx.chat, itx.text, chatty=itx.mode == Mode.CHAT)  # changes with the words of the moment
+    if words:
+        live.append(words)
+    if itx.mode == Mode.CHAT and not media_lately(st, itx.chat):
+        live.append("Ты давно не кидал стикер или гифку в этом чате: в этот раз ответь с ней (about — что выражаешь).")
     live.append(persona.MODES[itx.mode])  # last in the prompt: the mood must not be lost among the rules
     if itx.note:
         live.append(itx.note)

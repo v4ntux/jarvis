@@ -1,7 +1,10 @@
-"""Learning from what happens: the words a chat uses, and a nightly look back at the day.
+"""Learning from what happens: the words a chat uses, his own dictionary of slang, and a nightly look back at the day.
 
 Words are counted by code for free (every message of every chat) and shown back to the model as «словечки этого чата», so
-Jarvis talks the way each company talks. The night review is one model call a day: it reads the failures, the owner's
+Jarvis talks the way each company talks. Words people say often go to the night review, which sorts them: slang with its
+meaning goes into his dictionary, ordinary words are dropped, and the ones nobody could make out become questions he
+asks people in the chat (their answer goes into the dictionary with slang_learn). The dictionary is in every prompt
+and he uses it himself; code counts how often, so he varies the words. The night review is one model call a day: it reads the failures, the owner's
 corrections and what people wrote, and comes back with lessons (they apply at once and the owner is told in the morning,
 each can be dropped with /unlesson), people's profiles, and a short note. A day with no failures and nothing new costs
 nothing: the call is skipped.
@@ -35,6 +38,8 @@ DAY_REVIEW_AT = 4  # hour on the owner's clock
 MORNING_AT = 9
 LOOP_EVERY = 20 * 60
 MAX_NEW_LESSONS = 5
+DICT_SHOWN = 25
+SLANG_WORD = re.compile(r"[а-яёa-z][а-яёa-z\-]+", re.I)
 
 SYSTEM = """Ты разбираешь день ИИ-помощника Джарвиса, чтобы завтра он делал меньше ошибок и лучше понимал людей. Тебе дают: \
 что у него не вышло (журнал), как Ван его поправлял, уже записанные уроки и сообщения людей, с которыми он говорил.
@@ -44,6 +49,11 @@ SYSTEM = """Ты разбираешь день ИИ-помощника Джар�
 что видно из данных, не повторяй записанные. Пусто, если нечему учиться.
 - profiles: для людей с достаточным числом сообщений коротко (до 40 слов): как человек пишет, что любит, как с ним лучше \
 говорить, о чём шутят. Только по их сообщениям, ничего не выдумывай.
+- Новые слова из чатов (их часто говорят, рядом примеры) разложи по трём спискам, каждое слово ровно в один:
+  slang — сленг, мемные словечки, сокращения, внутренние шутки, смысл которых ясен из примеров или ты его знаешь: word, \
+meaning (коротко, как объяснил бы друг), example (короткая фраза, как это говорят);
+  plain — обычные слова, не сленг;
+  unclear — похоже на сленг или шутку компании, но смысл не понятен: Джарвис сам спросит у людей.
 Не придумывай ошибок, которых нет в данных."""
 
 SCHEMA = {
@@ -56,8 +66,13 @@ SCHEMA = {
         "profiles": {"type": "array", "items": {"type": "object", "properties": {
             "key": {"type": "string"}, "profile": {"type": "string"}}, "required": ["key", "profile"],
             "additionalProperties": False}},
+        "slang": {"type": "array", "items": {"type": "object", "properties": {
+            "word": {"type": "string"}, "meaning": {"type": "string"}, "example": {"type": "string"}},
+            "required": ["word", "meaning", "example"], "additionalProperties": False}},
+        "plain": {"type": "array", "items": {"type": "string"}},
+        "unclear": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["summary", "lessons", "profiles"],
+    "required": ["summary", "lessons", "profiles", "slang", "plain", "unclear"],
     "additionalProperties": False,
 }
 
@@ -79,6 +94,33 @@ def chat_style(store, chat: str) -> str:
         lines.append("Стикеры, которые тут кидают чаще всего: " + " ".join(f"{e}×{n}" for e, n in stickers) +
                      ". Если шлёшь стикер, бери похожие по духу.")
     return "\n".join(lines)
+
+
+def dictionary(store, chat: str, text: str = "", chatty: bool = True) -> str:
+    """His dictionary for the prompt (words of this moment and this chat first, the least used next), and in small
+    talk the words of this chat he does not get, to ask about."""
+    lines = []
+    known = store.slang_words()
+    if known:
+        now = {w.lower() for w in SLANG_WORD.findall(text or "")}
+        shown = sorted(known, key=lambda r: (r[0] not in now, r[3] != chat, r[4]))[:DICT_SHOWN]
+        lines.append("Твой словарь (выучил у людей). Говори этими словами сам: 1–2 к месту, не в каждой фразе, реже "
+                     "сказанные — почаще:\n" + "\n".join(f"{w} — {m}" for w, m, *_ in shown))
+    ask = store.slang_to_ask(chat) if chatty else []
+    if ask:
+        lines.append(f"Словечки этого чата, которых ты не понимаешь: {', '.join(ask)}. Будет к месту — спроси у "
+                     "собеседника по-свойски, что значит (одно за раз: «а чё такое …?»). Объяснят — сразу slang_learn.")
+    return "\n\n".join(lines)
+
+
+def said_myself(store, chat: str, text: str) -> None:
+    """What Jarvis just sent: dictionary words count as used, and a question with an unknown word counts as asked."""
+    words = [w.lower().strip("-") for w in SLANG_WORD.findall(text or "")]
+    store.slang_used(words)
+    if "?" in (text or ""):
+        for word in store.slang_to_ask(chat, limit=10):
+            if word in words:
+                store.slang_mark(word, "asked", chat)
 
 
 class Review:
@@ -128,7 +170,9 @@ class Review:
                 said += [m.text for m in st.chat_msgs(chat, limit=80) if m.ts >= since and m.sender == p.key and m.text]
             if len(said) >= 6:
                 people.append({"key": p.key, "name": p.name, "profile": p.profile, "said": [t[:160] for t in said[-15:]]})
-        return {"fails": fails, "stopped": stopped, "corrections": corrections[-15:], "people": people[:8]}
+        new_words = {w: [t[:140] for t in st.said_with(w, since - 6 * 86400)] for w in st.slang_candidates()}
+        return {"fails": fails, "stopped": stopped, "corrections": corrections[-15:], "people": people[:8],
+                "words": {w: said for w, said in new_words.items() if said}}
 
     async def run(self) -> str:
         core, st = self.core, self.store
@@ -136,13 +180,14 @@ class Review:
             return ""
         since = time.time() - 26 * 3600
         data = self.gather(since)
-        if not (data["fails"] or data["corrections"] or data["people"]):
+        if not (data["fails"] or data["corrections"] or data["people"] or data["words"]):
             return ""  # nothing to learn from: no call, no cost
         lessons = [t for _, t, _ in st.lessons()]
         prompt = (f"Не вышло за сутки ({len(data['fails'])}, прерванных задач {data['stopped']}):\n" + "\n".join(data["fails"])
                   + "\n\nКак Ван поправлял Джарвиса:\n" + "\n".join(data["corrections"])
                   + "\n\nУже записанные уроки:\n" + "\n".join(f"- {t}" for t in lessons)
-                  + "\n\nЛюди и их сообщения:\n" + json.dumps(data["people"], ensure_ascii=False))
+                  + "\n\nЛюди и их сообщения:\n" + json.dumps(data["people"], ensure_ascii=False)
+                  + "\n\nНовые слова из чатов и как их говорят:\n" + json.dumps(data["words"], ensure_ascii=False))
         try:
             model = core.budget.pick(Tier.BRAIN, owner=True)
             reply = await core.llm.complete(model, SYSTEM.format(n=MAX_NEW_LESSONS), [{"role": "user", "content": prompt}],
@@ -164,14 +209,33 @@ class Review:
         for item in verdict.get("profiles", [])[:8]:
             if item.get("key") in keys and str(item.get("profile", "")).strip():
                 st.set_profile(item["key"], str(item["profile"]).strip()[:400])
+        words = self.sort_words(verdict, set(data["words"]))
         summary = str(verdict.get("summary", "")).strip()
-        if summary or added:
+        if summary or added or words:
             note = "🌙 " + (summary or "разобрал вчерашний день")
             if added:
                 note += "\nвыучил:\n" + "\n".join(f"#{i} {t}" for i, t in added) + "\nкакой-то урок не нужен — /unlesson номер"
+            if words:
+                note += "\nновые словечки: " + ", ".join(words) + " (весь словарь — /slang)"
             st.meta_set("morning_note", note)
-        log.info("night review: %d lessons, %d profiles, $%.3f", len(added), len(verdict.get("profiles", [])), reply.cost)
+        log.info("night review: %d lessons, %d profiles, %d words, $%.3f", len(added), len(verdict.get("profiles", [])),
+                 len(words), reply.cost)
         return st.meta_get("morning_note")
+
+    def sort_words(self, verdict: dict, asked: set[str]) -> list[str]:
+        """Slang into the dictionary, ordinary words out of the way, the unclear ones to ask people; the new slang."""
+        learned = []
+        for item in verdict.get("slang", []):
+            word, meaning = str(item.get("word", "")).strip().lower(), str(item.get("meaning", "")).strip()
+            if word in asked and meaning:
+                if self.store.slang_learn(word, meaning, str(item.get("example", "")), source="ночной разбор"):
+                    learned.append(word)
+        for status in ("plain", "unclear"):
+            for word in verdict.get(status, []):
+                word = str(word).strip().lower()
+                if word in asked and word not in learned:
+                    self.store.slang_mark(word, "plain" if status == "plain" else "ask")
+        return learned
 
 
 def _words(text: str) -> list[str]:

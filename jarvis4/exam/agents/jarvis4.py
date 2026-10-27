@@ -106,11 +106,11 @@ class WorldTelegram:
     async def react(self, ref: str, emoji: str) -> None:
         self.w.react(self.w.message(ref).chat, ref, emoji)
 
-    async def sticker(self, chat: str, emoji: str, reply_ref: str = "") -> str:
-        self.w.sticker(chat, emoji)
+    async def sticker(self, chat: str, emoji: str, reply_ref: str = "", about: str = "") -> str:
+        self.w.sticker(chat, emoji, about)
         return self._last()
 
-    async def gif(self, chat: str, query: str, reply_ref: str = "") -> str:
+    async def gif(self, chat: str, query: str, reply_ref: str = "", about: str = "") -> str:
         self.w.gif(chat, query)
         return self._last()
 

@@ -23,6 +23,7 @@ from ..gem import Gemini, GeminiError
 from ..ports import CallResult, TGError
 from ..store import Person, Store
 from . import media
+from .manage import Manage
 from .pace import Pace, PacedClient
 from .taste import Taste
 
@@ -33,6 +34,7 @@ INBOX = "/opt/jarvis/data/inbox"
 MAX_FILE = 200 * 1024 * 1024
 PHONE = re.compile(r"^\+?\d[\d\s()-]{8,}$")
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+VIDEO_EXT = {".mp4", ".mov", ".m4v", ".mp3", ".m4a"}  # sent to play in the chat, not as a file to download
 TEXT_EXT = {".txt", ".md", ".csv", ".json", ".py", ".js", ".ts", ".html", ".xml", ".yaml", ".yml", ".log", ".ini"}
 PROGRESS_EVERY = 6  # seconds between edits of the status message
 
@@ -108,7 +110,7 @@ class OwnerOut(ChatOut):
             await self.acc.delete(ref)
 
 
-class Account:
+class Account(Manage):
     def __init__(self, cfg: Config, store: Store, gemini: Gemini):
         self.cfg, self.store, self.gem = cfg, store, gemini
         self.core: Core | None = None
@@ -173,7 +175,7 @@ class Account:
             return False
         me = await self.client.get_me()
         self.me_id = me.id
-        self.taste = Taste(self.client, self.store)
+        self.taste = Taste(self.client, self.store, gem=self.gem)
         self.client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
         self.client.add_event_handler(self._on_album, events.Album())
         await self._reach_owner()
@@ -225,8 +227,8 @@ class Account:
                 e = d.entity
                 if d.is_user and not getattr(e, "bot", False) and not getattr(e, "is_self", False) and e.id != SERVICE:
                     self.person(e, dialog=True)
-                elif d.is_group:
-                    self.store.chat_seen(self.group_key(d.id), "group", d.name, d.id)
+                elif d.is_group or d.is_channel:
+                    self.store.chat_seen(self.group_key(d.id), "group" if d.is_group else "channel", d.name, d.id)
             for user in getattr(await self.client(GetContactsRequest(hash=0)), "users", []):
                 if not getattr(user, "bot", False) and user.id != self.me_id:
                     self.person(user)
@@ -430,9 +432,10 @@ class Account:
                     item = io.BytesIO(data)
                     item.name = name
                     items.append(item)
-                photos = all(os.path.splitext(n)[1].lower() in IMAGE_EXT for n, _ in files)
+                playable = all(os.path.splitext(n)[1].lower() in IMAGE_EXT | VIDEO_EXT for n, _ in files)
                 sent = await self.client.send_file(entity, items if len(items) > 1 else items[0], caption=text or None,
-                                                   parse_mode=None, force_document=not photos, reply_to=reply_to)
+                                                   parse_mode=None, force_document=not playable, reply_to=reply_to,
+                                                   supports_streaming=True)
             else:
                 sent = await self.client.send_message(entity, text, parse_mode=None, link_preview=False,
                                                       reply_to=reply_to, silent=quiet)
@@ -564,17 +567,17 @@ class Account:
         except (RPCError, TGError):
             pass  # Telegram refuses emoji it does not offer: a missing like is not an error
 
-    async def sticker(self, chat: str, emoji: str, reply_ref: str = "") -> str:
-        if fake := self.dry("sticker", f"{chat} {emoji}"):
+    async def sticker(self, chat: str, emoji: str, reply_ref: str = "", about: str = "") -> str:
+        if fake := self.dry("sticker", f"{chat} {emoji} ({about})"):
             return fake
-        sent = await self.taste.express(await self.entity(chat), chat, sticker=emoji,
+        sent = await self.taste.express(await self.entity(chat), chat, sticker=emoji, about=about,
                                         reply_to=self.parse(reply_ref)[1] if reply_ref else None)
         return self.ref(chat, sent.id) if sent else ""
 
-    async def gif(self, chat: str, query: str, reply_ref: str = "") -> str:
-        if fake := self.dry("gif", f"{chat} {query}"):
+    async def gif(self, chat: str, query: str, reply_ref: str = "", about: str = "") -> str:
+        if fake := self.dry("gif", f"{chat} {query} ({about})"):
             return fake
-        sent = await self.taste.express(await self.entity(chat), chat, gif=query,
+        sent = await self.taste.express(await self.entity(chat), chat, gif=query, about=about,
                                         reply_to=self.parse(reply_ref)[1] if reply_ref else None)
         return self.ref(chat, sent.id) if sent else ""
 

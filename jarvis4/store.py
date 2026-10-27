@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS phone (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL,
 CREATE TABLE IF NOT EXISTS words (chat TEXT, word TEXT, n INTEGER, last REAL, PRIMARY KEY (chat, word));
 CREATE TABLE IF NOT EXISTS stickers_seen (
     chat TEXT, doc INTEGER, emoji TEXT, about TEXT, n INTEGER, after TEXT, last REAL, PRIMARY KEY (chat, doc));
+CREATE TABLE IF NOT EXISTS slang (
+    word TEXT PRIMARY KEY, meaning TEXT DEFAULT '', example TEXT DEFAULT '', source TEXT DEFAULT '', chat TEXT DEFAULT '',
+    status TEXT DEFAULT 'ask', asked REAL DEFAULT 0, learned REAL DEFAULT 0, uses INTEGER DEFAULT 0,
+    last_used REAL DEFAULT 0);
 """
 
 
@@ -404,6 +408,86 @@ class Store:
         """(emoji, times) of the stickers this chat sends most."""
         return self.db.execute("SELECT emoji, SUM(n) FROM stickers_seen WHERE chat = ? AND emoji != '' "
                                "GROUP BY emoji ORDER BY SUM(n) DESC LIMIT ?", (chat, limit)).fetchall()
+
+    # ---- his own dictionary: words people taught him -------------------------------------------------------------
+    # status: known (has a meaning) · ask (he does not get it: ask people) · asked · plain (an ordinary word, skip)
+
+    def slang_learn(self, word: str, meaning: str, example: str = "", source: str = "", chat: str = "") -> bool:
+        """A word and what it means; True when it is new to the dictionary."""
+        word = word.strip().lower()
+        old = self.slang(word)
+        self.db.execute("INSERT INTO slang (word, meaning, example, source, chat, status, learned) "
+                        "VALUES (?, ?, ?, ?, ?, 'known', ?) "
+                        "ON CONFLICT (word) DO UPDATE SET meaning = excluded.meaning, learned = excluded.learned, "
+                        "status = 'known', source = excluded.source, "
+                        "example = CASE WHEN excluded.example != '' THEN excluded.example ELSE example END, "
+                        "chat = CASE WHEN chat = '' THEN excluded.chat ELSE chat END",
+                        (word, meaning.strip()[:300], example.strip()[:200], source[:80], chat, time.time()))
+        self.db.commit()
+        return not (old and old["status"] == "known")
+
+    def slang_mark(self, word: str, status: str, chat: str = "") -> None:
+        """ask, asked or plain for a word without a meaning (a known word keeps its meaning)."""
+        self.db.execute("INSERT INTO slang (word, chat, status, asked) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT (word) DO UPDATE SET status = CASE WHEN status = 'known' THEN status "
+                        "ELSE excluded.status END, asked = CASE WHEN excluded.status = 'asked' THEN excluded.asked "
+                        "ELSE asked END", (word.strip().lower(), chat, status, time.time()))
+        self.db.commit()
+
+    def slang(self, word: str) -> dict | None:
+        keys = ("word", "meaning", "example", "source", "chat", "status", "asked", "uses")
+        row = self.db.execute(f"SELECT {', '.join(keys)} FROM slang WHERE word = ?", (word.strip().lower(),)).fetchone()
+        return dict(zip(keys, row)) if row else None
+
+    def slang_words(self, limit: int = 200) -> list[tuple[str, str, str, str, int]]:
+        """(word, meaning, example, chat, uses) of every word he knows, newest first."""
+        return self.db.execute("SELECT word, meaning, example, chat, uses FROM slang WHERE status = 'known' "
+                               "ORDER BY learned DESC LIMIT ?", (limit,)).fetchall()
+
+    def slang_forget(self, word: str) -> bool:
+        cur = self.db.execute("DELETE FROM slang WHERE word = ?", (word.strip().lower(),))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def slang_used(self, words: list[str]) -> int:
+        """He said these words himself: the dictionary's ones are counted (so he varies them)."""
+        now, n = time.time(), 0
+        for word in set(words):
+            n += self.db.execute("UPDATE slang SET uses = uses + 1, last_used = ? WHERE word = ? AND status = 'known'",
+                                 (now, word)).rowcount
+        self.db.commit()
+        return n
+
+    def slang_to_ask(self, chat: str, limit: int = 2, quiet_days: int = 2) -> list[str]:
+        """Words he does not get that this chat says, not asked about lately: «ask», or «asked» long ago."""
+        return [r[0] for r in self.db.execute(
+            "SELECT s.word FROM slang s JOIN words w ON w.word = s.word AND w.chat = ? WHERE s.status = 'ask' "
+            "OR (s.status = 'asked' AND s.asked < ?) ORDER BY w.n DESC LIMIT ?",
+            (chat, time.time() - quiet_days * 86400, limit)).fetchall()]
+
+    def slang_candidates(self, limit: int = 25, min_n: int = 3) -> list[str]:
+        """Words people say often that the dictionary has never sorted: for the night review."""
+        return [r[0] for r in self.db.execute(
+            "SELECT w.word FROM words w LEFT JOIN slang s ON s.word = w.word WHERE s.word IS NULL AND w.last >= ? "
+            "GROUP BY w.word HAVING SUM(w.n) >= ? ORDER BY SUM(w.n) DESC LIMIT ?",
+            (time.time() - 30 * 86400, min_n, limit)).fetchall()]
+
+    def said_with(self, word: str, since: float, limit: int = 3) -> list[str]:
+        """Messages of people (not Jarvis) with this word, newest first: how it is used."""
+        return [r[0] for r in self.db.execute(
+            "SELECT text FROM msgs WHERE ts >= ? AND sender != 'jarvis' AND (text LIKE ? OR text LIKE ?) "
+            "ORDER BY id DESC LIMIT ?",  # LIKE folds only Latin case: the Cyrillic capital is asked for itself
+            (since, f"%{word}%", f"%{word.capitalize()}%", limit)).fetchall()]
+
+    # ---- people Jarvis does not answer --------------------------------------------------------------------------
+
+    def ignored(self) -> set[str]:
+        return set(json.loads(self.meta_get("ignored") or "[]"))
+
+    def set_ignored(self, key: str, on: bool = True) -> None:
+        keys = self.ignored()
+        keys = keys | {key} if on else keys - {key}
+        self.meta_set("ignored", json.dumps(sorted(keys)))
 
     # ---- meta, watchers, reminders, favorites ------------------------------------------------------------------
 

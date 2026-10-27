@@ -21,6 +21,7 @@ from .config import Config
 from .eyes import Eyes
 from .guard import Verdict
 from .llm import LLM
+from .ops import grab
 from .ports import Platform
 from .store import Msg, Store
 from .tools import Ctx, Risk, Tool, all_tools
@@ -129,6 +130,12 @@ class Core:
     async def on_message(self, inc: Incoming) -> None:
         """Every message Jarvis's account receives. Returns at once; the work goes on in the background."""
         self.ingest(inc)
+        if inc.sender != "owner" and inc.sender in self.store.ignored():
+            return  # kept in the history, never answered
+        url = grab.bare_link(inc.text) if not inc.media else ""
+        if url and not self.frozen() and (self.store.chat(inc.chat) or ("", "", "on"))[2] != "off":
+            self.spawn(self._grab(inc, url))  # a bare TikTok/Instagram/YouTube link: the video comes back, no model
+            return
         if inc.sender == "owner" and not inc.group:
             for hook in self.owner_hooks:
                 hook()
@@ -268,6 +275,7 @@ class Core:
             if ref:
                 self.store.add_msg(ref, itx.chat, "jarvis", piece, reply_ref=itx.ref if itx.kind == "group" else "",
                                    task=itx.id)
+        learn.said_myself(self.store, itx.chat, text)
         if itx.kind == "group":
             self.group_last_spoke[itx.chat] = (time.time(), itx.sender)
         voice = getattr(itx.out, "voice", None)
@@ -276,6 +284,20 @@ class Core:
                 await voice(text)
             except Exception:  # a missing voice is not worth an error: the words were already sent
                 log.warning("voice reply failed", exc_info=True)
+
+    async def _grab(self, inc: Incoming, url: str) -> None:
+        reply = inc.ref if inc.group else ""
+        try:
+            line = await grab.deliver(self.platform.tg, self.store, inc.chat, url, inc.sender == "owner", reply)
+            self.store.journal_add("auto", "media_download", {"url": url, "chat": inc.chat}, True, line)
+        except grab.GrabError as e:
+            self.store.journal_add("auto", "media_download", {"url": url, "chat": inc.chat}, False, str(e))
+            if inc.group:
+                await self.platform.tg.react(inc.ref, "🤷")
+            else:
+                await self.out_for(inc.chat).say(f"не скачалось: {e}")
+        except Exception:
+            log.exception("download of %s failed", url)
 
     # ---- strangers and groups ----------------------------------------------------------------------------------
 

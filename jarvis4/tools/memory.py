@@ -31,6 +31,17 @@ async def learn_lesson(ctx: Ctx, a: dict) -> Result:
     return Result(True, f"Записал урок #{lesson_id}.", evidence=text)
 
 
+async def slang_learn(ctx: Ctx, a: dict) -> Result:
+    """Somebody explained a word (or Jarvis found it out): it goes into his own dictionary and into his speech."""
+    word = str(a.get("word", "")).strip().lower()
+    meaning = str(a.get("meaning", "")).strip()
+    if not word or len(word) > 40 or not meaning:
+        return fail("нужно слово (word) и что оно значит (meaning).")
+    who = "Ван" if ctx.itx.owner else ctx.core.name_of(ctx.itx.sender)
+    new = ctx.store.slang_learn(word, meaning, str(a.get("example") or ""), source=who, chat=ctx.itx.chat)
+    return Result(True, f"{'Выучил' if new else 'Уточнил'} «{word}»: {meaning}.", evidence=word)
+
+
 async def journal(ctx: Ctx, a: dict) -> Result:
     rows = ctx.store.journal(min(int(a.get("limit") or 12), 40), query=str(a.get("query") or ""))
     if not rows:
@@ -96,6 +107,10 @@ def tools() -> list[Tool]:
              "делай», он будет перед глазами всякий раз, когда ситуация повторится. when — коротко, когда это "
              "применять.", {"text": S, "when": S}, ["text"], learn_lesson, light=True,
              label=lambda a, r: "записал урок"),
+        Tool("slang_learn", "Записать в свой словарь новое словечко: кто-то объяснил, что оно значит (или ты узнал сам). "
+             "word, meaning — коротко, как объяснил бы друг, example — как это говорят. Потом говори так сам.",
+             {"word": S, "meaning": S, "example": S}, ["word", "meaning"], slang_learn, light=True, others=True,
+             label=lambda a, r: f"учу слово {a.get('word', '')}"),
         Tool("journal", "Журнал моих действий: что я делал, с какими точными аргументами и что вышло. query — слово "
              "для поиска. Для «что ты писал», «что делал вчера».", {"query": S, "limit": I}, [], journal, light=True),
         Tool("set_reminder", "Напоминание или звонок в нужное время: in_minutes или at (ISO по времени Вана), call=true "
